@@ -47,6 +47,77 @@ func elemSerializeCompressed(e secp.JacobianPoint) ([]byte, error) {
 	return pk.SerializeCompressed(), nil
 }
 
+func twoScalar() secp.ModNScalar {
+	var t secp.ModNScalar
+	t.SetInt(2)
+	return t
+}
+
+func ComputeMaskedDiffShares(
+	a, b *secp.ModNScalar,
+	x, y, z *secp.ModNScalar,
+) (alphaShare, betaShare secp.ModNScalar) {
+
+	alphaShare = secp.ModNScalar{}
+	alphaShare.Add2(a, x.Negate()) // (a - x)_share
+
+	betaShare = secp.ModNScalar{}
+	betaShare.Add2(b, y.Negate()) // (b - y)_share
+	return
+}
+
+// Compute Multiplication Using Beever Triples
+func MultiplyShare(a, b, x, y, z, α, β *secp.ModNScalar) secp.ModNScalar {
+	// local ab share = z + α*y + β*x + αβ
+	var term1, term2, res secp.ModNScalar
+	term1.Mul2(α, y) // α*y_share
+	term2.Mul2(β, x) // β*x_share
+
+	res.Add2(z, &term1).Add(&term2)
+
+	var alphaBeta secp.ModNScalar
+	alphaBeta.Mul2(α, β)
+	res.Add(&alphaBeta)
+
+	return res
+}
+
+// Compute XOR
+func XORShared(a, b, x, y, z, α, β *secp.ModNScalar) secp.ModNScalar {
+	res := MultiplyShare(a, b, x, y, z, α, β) // ab
+
+	sum := secp.ModNScalar{}
+	sum.Add2(a, b) // a + b
+
+	twoScalar := twoScalar()       // 2
+	twoprod := res.Mul(&twoScalar) // 2ab
+
+	return *twoprod.Negate().Add(&sum) // a + b - 2ab
+}
+
+// Compute AND
+func ANDShared(a, b, x, y, z, α, β *secp.ModNScalar) secp.ModNScalar {
+	return MultiplyShare(a, b, x, y, z, α, β) // ab
+}
+
+// Majority of (a,b,c) = ab + bc - 2abc
+// Beever Triples: (x,y,z) where z = xy
+func ComputeMajority(a, b, c, x, y, z *secp.ModNScalar) secp.ModNScalar {
+	ab := MultiplyShare(a, b, x, y, z) // ab
+
+	bc := MultiplyShare(b, c, x, y, z) // bc
+
+	twoScalar := twoScalar()               // 2
+	temp := MultiplyShare(&ab, c, x, y, z) // abc
+	threeprod := temp.Mul(&twoScalar)      // 2abc
+
+	sum := secp.ModNScalar{}
+	sum.Add2(&ab, &bc)          // ab + bc
+	sum.Add(threeprod.Negate()) // ab + bc + ac
+
+	return sum
+}
+
 // Deserialize compressed: pubkey(compressed) -> affine -> Jacobian(Z=1)
 func elemDeserializeCompressed(b []byte) (secp.JacobianPoint, error) {
 	pk, err := secp.ParsePubKey(b)
@@ -276,4 +347,13 @@ func verifyProofOfKnowledge(
 		return ErrInvalidSecretShare // reusing; or define ErrInvalidProofOfKnowledge
 	}
 	return nil
+}
+
+func generate16BitRandom(r io.Reader) ([]byte, error) {
+	var b [2]byte
+	if _, err := r.Read(b[:]); err != nil {
+		return nil, err
+	}
+
+	return b[:], nil
 }
