@@ -70,18 +70,23 @@ func (p *Participant) Run(ctx context.Context) (thres.DKGOutput, thres.RecoveryD
 	if err != nil {
 		return thres.DKGOutput{}, thres.RecoveryData{}, err
 	}
-	if err := p.Transport.SendTo(ctx, p.coord(), Message{Type: msgEnc2, Payload: encPayload}); err != nil {
+	if err := p.Transport.SendTo(ctx, p.coord(), Message{Type: msgEncRound2, Payload: encPayload}); err != nil {
 		return thres.DKGOutput{}, thres.RecoveryData{}, err
 	}
 
-	// Receive this participant's aggregated encrypted share.
-	encShareMsg, err := waitFor(ctx, p.Transport.Inbox(), msgEncShare)
+	// Receive the broadcast of every participant's aggregated encrypted share;
+	// keep them all for RecoveryData and use our own to finalize.
+	encMsg, err := waitFor(ctx, p.Transport.Inbox(), msgEncShares)
 	if err != nil {
 		return thres.DKGOutput{}, thres.RecoveryData{}, err
 	}
-	encShare, err := hexToScalar(string(encShareMsg.Payload))
+	encShares, err := unmarshalEncShares(encMsg.Payload)
 	if err != nil {
 		return thres.DKGOutput{}, thres.RecoveryData{}, err
+	}
+	encShare, ok := encShares[p.Self]
+	if !ok {
+		return thres.DKGOutput{}, thres.RecoveryData{}, ErrProtocol
 	}
 
 	// Finalize: decrypt + verify share, build key packages, sign the transcript.
@@ -126,7 +131,7 @@ func (p *Participant) Run(ctx context.Context) (thres.DKGOutput, thres.RecoveryD
 	if err != nil {
 		return thres.DKGOutput{}, thres.RecoveryData{}, err
 	}
-	rec, err := thres.VerifyCertificate(p.Params, eqInput, sigs, round1All, ephPubs)
+	rec, err := thres.VerifyCertificate(p.Params, eqInput, sigs, round1All, ephPubs, encShares)
 	if err != nil {
 		return thres.DKGOutput{}, thres.RecoveryData{}, err
 	}

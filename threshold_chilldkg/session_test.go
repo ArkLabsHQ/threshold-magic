@@ -66,7 +66,8 @@ func TestSessionEndToEndOverMemTransport(t *testing.T) {
 	coordErr := make(chan error, 1)
 	go func() {
 		coord := &Coordinator{Params: params, Transport: coordEndpoint}
-		coordErr <- coord.Run(ctx)
+		_, cerr := coord.Run(ctx)
+		coordErr <- cerr
 	}()
 
 	for _, id := range ids {

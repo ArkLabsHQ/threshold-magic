@@ -194,10 +194,33 @@ func TestChillDKGEndToEnd(t *testing.T) {
 	for _, p := range res.parts {
 		assert.Equal(t, ref0, res.eqInputs[p.id], "all parties signed the same eq_input")
 	}
-	rec, err := VerifyCertificate(res.params, ref0, res.sigs, res.round1, res.ephPubs)
+	rec, err := VerifyCertificate(res.params, ref0, res.sigs, res.round1, res.ephPubs, res.encShare)
 	require.NoError(t, err)
 	assert.Len(t, rec.Certificate, int(max))
-	assert.NotEmpty(t, rec.Transcript)
+	require.NoError(t, rec.Verify())
+
+	// RecoverShare reproduces every participant's KeyPackage from just its host
+	// key + the shared blob (the identifier is found by host-key lookup).
+	for _, p := range res.parts {
+		out, rerr := RecoverShare(rec, p.hostSk)
+		require.NoErrorf(t, rerr, "recover %v", p.id)
+		assert.Truef(t, out.Key.Identifier.Equal(p.id), "recovered the wrong identifier for %v", p.id)
+		want := res.outputs[p.id].Key.SecretShare
+		got := out.Key.SecretShare
+		assert.Truef(t, (*secp.ModNScalar)(&got).Equals((*secp.ModNScalar)(&want)), "recovered share mismatch for %v", p.id)
+		wantVK := res.outputs[p.id].Key.VerifyingKey
+		assert.True(t, out.Key.VerifyingKey.E.EquivalentNonConst(&wantVK.E), "recovered VK mismatch")
+	}
+
+	// Round-trip: Serialize -> Parse -> Serialize is byte-identical and still recovers.
+	blob, err := rec.Serialize()
+	require.NoError(t, err)
+	rec2, err := ParseRecoveryData(blob)
+	require.NoError(t, err)
+	blob2, err := rec2.Serialize()
+	require.NoError(t, err)
+	assert.Equal(t, blob, blob2, "serialization is canonical")
+	require.NoError(t, rec2.Verify())
 }
 
 func TestChillDKGTamperedCiphertextFails(t *testing.T) {
@@ -512,4 +535,69 @@ func TestPartialCiphertextsFor(t *testing.T) {
 	delete(res.perSender, ids[0])
 	_, err = PartialCiphertextsFor(res.perSender, victim, ids)
 	assert.ErrorIs(t, err, ErrIncorrectPackage)
+}
+
+func TestRandomIdentifier(t *testing.T) {
+	seen := make(map[string]bool, 200)
+	for i := 0; i < 200; i++ {
+		id, err := RandomIdentifier(rand.Reader)
+		require.NoError(t, err)
+		assert.False(t, id.S.IsZero(), "identifier must be non-zero")
+		k := string(id.Serialize())
+		assert.Falsef(t, seen[k], "duplicate random identifier")
+		seen[k] = true
+	}
+}
+
+func mustRecoveryData(t *testing.T, res chillResult) RecoveryData {
+	t.Helper()
+	ref := res.eqInputs[res.parts[0].id]
+	rec, err := VerifyCertificate(res.params, ref, res.sigs, res.round1, res.ephPubs, res.encShare)
+	require.NoError(t, err)
+	return rec
+}
+
+func TestRecoverShareTamperedEncShareFails(t *testing.T) {
+	res, err := runChillDKG(t, 2, 3, false)
+	require.NoError(t, err)
+	rec := mustRecoveryData(t, res)
+	victim := res.parts[1]
+
+	rec.EncShares[victim.id] = bumpScalar(rec.EncShares[victim.id])
+	_, err = RecoverShare(rec, victim.hostSk)
+	assert.ErrorIs(t, err, ErrInvalidSecretShare, "a tampered share must error, never recover a wrong share")
+}
+
+func TestRecoverShareGuards(t *testing.T) {
+	res, err := runChillDKG(t, 2, 3, false)
+	require.NoError(t, err)
+	rec := mustRecoveryData(t, res)
+
+	// A host key that belongs to no participant cannot recover anything.
+	foreign, err := secp.GeneratePrivateKey()
+	require.NoError(t, err)
+	_, err = RecoverShare(rec, foreign)
+	assert.ErrorIs(t, err, ErrHostKeyMismatch)
+
+	// A nil host key is rejected.
+	_, err = RecoverShare(rec, nil)
+	assert.ErrorIs(t, err, ErrHostKeyMismatch)
+}
+
+func TestRecoveryDataVerifyRejectsTamperedCert(t *testing.T) {
+	res, err := runChillDKG(t, 2, 3, false)
+	require.NoError(t, err)
+	rec := mustRecoveryData(t, res)
+	require.NoError(t, rec.Verify())
+
+	// Replace one signature with a valid sig over a different message (equivocation).
+	victim := res.parts[1]
+	ref := res.eqInputs[res.parts[0].id]
+	var other [32]byte
+	copy(other[:], ref[:])
+	other[0] ^= 0xff
+	badSig, err := CertEqSign(victim.hostSk, other)
+	require.NoError(t, err)
+	rec.Certificate[victim.id] = badSig
+	assert.ErrorIs(t, rec.Verify(), ErrInvalidCertSignature)
 }

@@ -54,10 +54,16 @@ When a recipient's aggregate share fails to verify, attribution recovers *who* i
 - `InvestigateShare` runs, in order: **(0)** infinity-key guard (returns `ErrInfinityVerifyingKey` — blames no one); **(1)** verify each sender's round-2 signature — a missing/invalid signature ⇒ `FaultyCoordinatorError` (it tampered or withheld; cannot forge); **(2)** the authenticated parts must sum to the handed aggregate ⇒ else `FaultyCoordinatorError`; **(3)** per-sender check `g^{f_i(ℓ)} == φ_i.GetVerifyingShare(ℓ)` in sorted order — a signed-but-inconsistent share ⇒ `FaultyParticipantError{Culprit}` (deterministic, lowest id).
 - **Soundness principle:** a participant is blamed only on cryptographic proof (a validly signed, inconsistent share); ambiguous failures fall to the coordinator, so an honest sender is never framed.
 
+### 2.6 Share recovery & canonical RecoveryData — [threshold_core/recovery.go](threshold_core/recovery.go)
+- `RecoveryData` is a single **shared, public blob** (identical for all participants): session params, round-1 contributions, ephemeral keys, the aggregated per-recipient encrypted shares, and the success certificate. It holds no secrets — the encrypted shares are additively masked from non-recipients.
+- `RecoverShare(rd, hostSk)` lets any member recompute its own `DKGOutput` from **just its host secret key + the blob** — no identifier need be remembered: the caller's identifier is found by matching its host public key in the blob (host keys are unique, enforced by `Validate`). It verifies the certificate, then reuses `DecryptAndVerifyShare` (which re-checks the result against the certified group commitment, so a tampered share errors rather than returning a wrong one). This mirrors the BIP's `recover(hostseckey, recovery_data)`, which finds your index by host-pubkey lookup.
+- `Verify()` re-derives the transcript from the structured fields and checks the full N-of-N certificate; `Serialize()`/`ParseRecoveryData` give a **canonical, deterministic** encoding (hex-keyed JSON; `SessionID` re-derived on parse, never trusted) so every party produces byte-identical blobs.
+- The coordinator broadcasts all aggregated shares (`msgEncShares`) so every participant can populate the shared blob, and `Coordinator.Run` itself returns the same canonical `RecoveryData` (verified before the certificate is broadcast) so the coordinator can serve it to a returning member.
+
 ## 3. Transport-agnostic SDK — `threshold_chilldkg`
 
 - **`Transport` interface** + reference in-memory **`MemHub`** ([transport.go](threshold_chilldkg/transport.go)); messages are `{Type, From, To, Payload}` with hex-identifier addresses; wire codec in [wire.go](threshold_chilldkg/wire.go).
-- **`Participant`** ([participant.go](threshold_chilldkg/participant.go)) and **`Coordinator`** ([coordinator.go](threshold_chilldkg/coordinator.go)) drive a full ceremony over the pure step functions: round 1 → cmsg1 broadcast → encrypted round 2 → aggregate → finalize → CertEq.
+- **`Participant`** ([participant.go](threshold_chilldkg/participant.go)) and **`Coordinator`** ([coordinator.go](threshold_chilldkg/coordinator.go)) drive a full ceremony over the pure step functions: round 1 → cmsg1 broadcast → encrypted round 2 → aggregate → finalize → CertEq. Both `Run` methods return the `RecoveryData` blob (the coordinator so it can serve it; participants for their own backup).
 - **Byzantine-robust collection** — `collectFromAll` counts **distinct, authenticated senders** (membership-filtered, first-message-wins), so a participant flooding duplicates cannot starve another's slot.
 - **Investigation round-trip** — a participant whose finalize fails sends `msgInvRequest`; the coordinator replies point-to-point with the per-sender authenticated ciphertexts (`msgInvData`); the failing participant returns the typed culprit error. Other participants receive `msgAbort` and return `ErrCeremonyAborted`. A withheld `msgInvData` is normalized to `FaultyCoordinatorError`.
 
@@ -67,18 +73,18 @@ When a recipient's aggregate share fails to verify, attribution recovers *who* i
 - **Share secrecy** — additive pads make round-2 ciphertexts information-theoretically masked from everyone but the intended recipient (and the coordinator that only sees sums).
 - **Blame soundness** — round-2 signatures + CertEq root attribution in the host keys; a malicious coordinator that alters/withholds a share is itself blamed, never an honest sender. (One residual: a coordinator that *equivocates* the round-1 broadcast `cmsg1` on an unauthenticated network transport — see deferred items. `MemHub` broadcasts consistently, so this is not expressible there.)
 - **Liveness** — abort is always possible for any participant (withholding); the protocol provides *identifiable* abort (who to exclude on retry), not guaranteed completion.
+- **Recoverability** — the public `RecoveryData` blob lets any member recover its `DKGOutput` from a backup + its host key, and convinces a latecomer of the result via the success certificate (§2.6).
 
 ## 5. Deferred / out of scope
 
 - **`cmsg1`-equivocation binding** (e.g. an `eq_input` comparison step) for full blame soundness on an adversarial *network* transport.
 - **Automated retry** excluding an identified culprit (identifiable-abort → re-run).
-- **Share recovery** from `RecoveryData` (currently transcript + certificate only) and a canonical `RecoveryData` serialization.
 - A first-class **network transport adapter** (the SDK is transport-agnostic; only the in-memory `MemHub` ships here).
 
 ## 6. Tests
 
-- `threshold_core`: PedPop dealer DKG; ChillDKG end-to-end (reconstruct == Σ secrets, group-key agreement, certificate verify); pad round-trip; eq_input determinism/tamper; CertEq equivocation; blame attribution (faulty sender, coordinator share-tamper, self-tamper, aggregate mismatch, infinity-neutral, deterministic culprit); `PartialCiphertextsFor`.
+- `threshold_core`: PedPop dealer DKG; ChillDKG end-to-end (reconstruct == Σ secrets, group-key agreement, certificate verify); pad round-trip; eq_input determinism/tamper; CertEq equivocation; blame attribution (faulty sender, coordinator share-tamper, self-tamper, aggregate mismatch, infinity-neutral, deterministic culprit); `PartialCiphertextsFor`; recovery (RecoverShare reproduces each KeyPackage from host key alone, canonical Serialize/Parse round-trip, tampered-share error, foreign/nil host-key guards, tampered-cert rejection).
 - `threshold_frost`: FROST sign+aggregate over ChillDKG-produced keys.
-- `threshold_chilldkg`: full session over `MemHub`; coordinator-share-tamper ⇒ coordinator blamed (honest sender not framed); withheld investigation data ⇒ coordinator blamed; duplicate-flood ⇒ deduped and ceremony succeeds.
+- `threshold_chilldkg`: full session over `MemHub`; coordinator-share-tamper ⇒ coordinator blamed (honest sender not framed); withheld investigation data ⇒ coordinator blamed; duplicate-flood ⇒ deduped and ceremony succeeds; recovery (all participants' blobs byte-identical, round-trip, `RecoverShare` reproduces each key).
 
 Run: `cd threshold-magic && for m in threshold_core threshold_frost threshold_chilldkg; do go test -C $m ./...; done`

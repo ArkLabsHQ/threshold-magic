@@ -44,10 +44,11 @@ func (c *Coordinator) collectFromAll(ctx context.Context, handle func(id thres.I
 	return nil
 }
 
-// Run collects round-1 contributions, broadcasts them, aggregates the encrypted
-// shares, distributes each participant's aggregate, then collects and broadcasts
-// the success certificate (or aborts on an investigation request).
-func (c *Coordinator) Run(ctx context.Context) error {
+// Run drives the coordinator side: collect round 1, broadcast it, aggregate and
+// broadcast the encrypted shares, then collect the certificate (or abort on an
+// investigation request). On success it returns the canonical RecoveryData blob —
+// identical to every participant's — so the coordinator can serve it later.
+func (c *Coordinator) Run(ctx context.Context) (thres.RecoveryData, error) {
 	n := int(c.Params.N)
 
 	// Phase 1: collect round-1 contributions, then broadcast them to everyone.
@@ -62,21 +63,21 @@ func (c *Coordinator) Run(ctx context.Context) error {
 		ephPubs[id] = ephPub
 		return nil
 	}, msgRound1); err != nil {
-		return err
+		return thres.RecoveryData{}, err
 	}
 	if err := thres.CoordinatorStep1(c.Params, round1); err != nil {
-		return err
+		return thres.RecoveryData{}, err
 	}
 	cmsg1, err := marshalCmsg1(round1, ephPubs)
 	if err != nil {
-		return err
+		return thres.RecoveryData{}, err
 	}
 	if err := c.Transport.Broadcast(ctx, Message{Type: msgCmsg1, Payload: cmsg1}); err != nil {
-		return err
+		return thres.RecoveryData{}, err
 	}
 
 	// Phase 2: collect the encrypted round-2 messages, aggregate per recipient,
-	// and send each participant its aggregate.
+	// and broadcast every aggregate.
 	perSender := make(map[thres.Identifier]thres.EncRound2, n)
 	if err := c.collectFromAll(ctx, func(id thres.Identifier, m Message) error {
 		enc, err := unmarshalEnc2(m.Payload)
@@ -85,18 +86,22 @@ func (c *Coordinator) Run(ctx context.Context) error {
 		}
 		perSender[id] = enc
 		return nil
-	}, msgEnc2); err != nil {
-		return err
+	}, msgEncRound2); err != nil {
+		return thres.RecoveryData{}, err
 	}
 	ids := c.Params.IDs()
 	encShares, err := thres.CoordinatorFinalize(perSender, ids)
 	if err != nil {
-		return err
+		return thres.RecoveryData{}, err
 	}
-	for id, share := range encShares {
-		if err := c.Transport.SendTo(ctx, addrOf(id), Message{Type: msgEncShare, Payload: []byte(scalarToHex(share))}); err != nil {
-			return err
-		}
+	// Broadcast all aggregated shares (each is masked from non-recipients) so every
+	// participant can both finalize its own and retain the full set for RecoveryData.
+	encPayload, err := marshalEncShares(encShares)
+	if err != nil {
+		return thres.RecoveryData{}, err
+	}
+	if err := c.Transport.Broadcast(ctx, Message{Type: msgEncShares, Payload: encPayload}); err != nil {
+		return thres.RecoveryData{}, err
 	}
 
 	// Phase 3: each participant sends exactly one of msgCert or msgInvRequest.
@@ -128,19 +133,36 @@ func (c *Coordinator) Run(ctx context.Context) error {
 		}
 		return nil
 	}, msgCert, msgInvRequest); err != nil {
-		return err
+		return thres.RecoveryData{}, err
 	}
 
 	if aborted {
 		if err := c.Transport.Broadcast(ctx, Message{Type: msgAbort}); err != nil {
-			return err
+			return thres.RecoveryData{}, err
 		}
-		return ErrCeremonyAborted
+		return thres.RecoveryData{}, ErrCeremonyAborted
+	}
+
+	// Assemble the recovery blob and confirm the certificate is valid before
+	// broadcasting it; the coordinator then holds the same canonical blob to serve.
+	rd := thres.RecoveryData{
+		Params:      c.Params,
+		Round1:      round1,
+		EphPubs:     ephPubs,
+		EncShares:   encShares,
+		Certificate: sigs,
+	}
+	if err := rd.Verify(); err != nil {
+		_ = c.Transport.Broadcast(ctx, Message{Type: msgAbort})
+		return thres.RecoveryData{}, err
 	}
 
 	certSet, err := marshalCertSet(sigs)
 	if err != nil {
-		return err
+		return thres.RecoveryData{}, err
 	}
-	return c.Transport.Broadcast(ctx, Message{Type: msgCertSet, Payload: certSet})
+	if err := c.Transport.Broadcast(ctx, Message{Type: msgCertSet, Payload: certSet}); err != nil {
+		return thres.RecoveryData{}, err
+	}
+	return rd, nil
 }

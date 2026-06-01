@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
@@ -44,6 +45,24 @@ func Derive(msg []byte) (Identifier, error) {
 		return Identifier{}, err
 	}
 	return NewIdentifier(s)
+}
+
+// RandomIdentifier draws a uniformly random, non-zero identifier from r. A random
+// identifier leaks nothing about the participant and, drawn fresh per session, is
+// unlinkable across sessions; it must be agreed as part of the session parameters
+// (recovery finds a participant by host-pubkey lookup, not by recomputing the id).
+func RandomIdentifier(r io.Reader) (Identifier, error) {
+	for {
+		var b [32]byte
+		if _, err := io.ReadFull(r, b[:]); err != nil {
+			return Identifier{}, err
+		}
+		var s secp.ModNScalar
+		s.SetByteSlice(b[:])
+		if !s.IsZero() {
+			return NewIdentifier(s)
+		}
+	}
 }
 
 // Serialize returns the 32-byte big-endian encoding of the scalar (Decred’s encoding).

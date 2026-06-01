@@ -53,7 +53,7 @@ func (f *fnTransport) Inbox() <-chan Message { return f.inner.Inbox() }
 // now-stale signature — modelling a relay that tampers with a share it can't re-sign.
 func corruptEnc2To(victim thres.Identifier) func(string, Message) (Message, bool) {
 	return func(to string, msg Message) (Message, bool) {
-		if msg.Type != msgEnc2 {
+		if msg.Type != msgEncRound2 {
 			return msg, true
 		}
 		enc, err := unmarshalEnc2(msg.Payload)
@@ -165,7 +165,7 @@ func TestSessionBlamesCoordinatorOnShareTamper(t *testing.T) {
 	}
 
 	coordErr := make(chan error, 1)
-	go func() { coordErr <- coord.Run(ctx) }()
+	go func() { _, cerr := coord.Run(ctx); coordErr <- cerr }()
 	ch := make(chan partResult, len(parts))
 	for _, p := range parts {
 		p := p
@@ -227,7 +227,7 @@ func TestSessionCoordinatorWithholdsInvData(t *testing.T) {
 	}
 
 	coordErr := make(chan error, 1)
-	go func() { coordErr <- coord.Run(ctx) }()
+	go func() { _, cerr := coord.Run(ctx); coordErr <- cerr }()
 	ch := make(chan partResult, len(parts))
 	for _, p := range parts {
 		p := p
@@ -284,7 +284,7 @@ func TestCoordinatorDedupsDuplicatePhase3(t *testing.T) {
 	}
 
 	coordErr := make(chan error, 1)
-	go func() { coordErr <- coord.Run(ctx) }()
+	go func() { _, cerr := coord.Run(ctx); coordErr <- cerr }()
 	ch := make(chan partResult, len(parts))
 	for _, p := range parts {
 		p := p

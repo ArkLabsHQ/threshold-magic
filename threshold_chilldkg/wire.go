@@ -234,3 +234,33 @@ func unmarshalCertSet(payload []byte) (map[thres.Identifier]*schnorr.Signature, 
 	}
 	return out, nil
 }
+
+// --- encshares (coordinator -> all): aggregated per-recipient shares ---
+
+func marshalEncShares(shares map[thres.Identifier]secp.ModNScalar) ([]byte, error) {
+	m := make(map[string]string, len(shares))
+	for id, s := range shares {
+		m[addrOf(id)] = scalarToHex(s)
+	}
+	return json.Marshal(m)
+}
+
+func unmarshalEncShares(payload []byte) (map[thres.Identifier]secp.ModNScalar, error) {
+	var m map[string]string
+	if err := json.Unmarshal(payload, &m); err != nil {
+		return nil, err
+	}
+	out := make(map[thres.Identifier]secp.ModNScalar, len(m))
+	for addr, s := range m {
+		id, err := idOf(addr)
+		if err != nil {
+			return nil, err
+		}
+		sc, err := hexToScalar(s)
+		if err != nil {
+			return nil, err
+		}
+		out[id] = sc
+	}
+	return out, nil
+}

@@ -19,6 +19,10 @@ const tagParamsID = "thresholdmagic/params_id"
 // ErrInvalidSessionParams is returned when session parameters are malformed.
 var ErrInvalidSessionParams = errors.New("invalid session params")
 
+// ErrDuplicateHostKey is returned when two participants share a host public key
+// (host keys must be distinct so an identifier is recoverable from its host key).
+var ErrDuplicateHostKey = errors.New("duplicate host public key")
+
 // SessionParams are the parameters all participants must agree on for a session.
 // Per ChillDKG there is no random nonce: SessionID is the deterministic params_id
 // (see ParamsID), so everyone derives it identically. Per-session freshness comes
@@ -94,10 +98,21 @@ func (p SessionParams) validateStructure() error {
 	if len(p.HostPubs) != int(p.N) {
 		return ErrInvalidSessionParams
 	}
-	for id := range p.HostPubs {
+	// Identifiers non-zero; host keys distinct (1:1 map, so RecoverShare can find a
+	// participant by its host key).
+	seenPub := make(map[string]struct{}, len(p.HostPubs))
+	for id, pub := range p.HostPubs {
 		if id.S.IsZero() {
 			return ErrInvalidZeroScalar
 		}
+		if pub == nil {
+			return ErrMissingHostKey
+		}
+		k := string(pub.SerializeCompressed())
+		if _, dup := seenPub[k]; dup {
+			return ErrDuplicateHostKey
+		}
+		seenPub[k] = struct{}{}
 	}
 	return nil
 }
@@ -124,11 +139,16 @@ type DKGOutput struct {
 	Public PublicKeyPackage
 }
 
-// RecoveryData is the public, non-confidential backup that lets a party be
-// convinced of the result later: the transcript plus the success certificate.
+// RecoveryData is the public backup of a completed session: a single shared blob
+// (identical for all participants) from which any member recovers its own DKG
+// output with its host secret key (see RecoverShare). It holds no secrets — the
+// EncShares are additively masked from non-recipients.
 type RecoveryData struct {
-	Transcript  []byte
-	Certificate map[Identifier][]byte // id -> serialized BIP340 signature
+	Params      SessionParams
+	Round1      map[Identifier]Round1Package
+	EphPubs     map[Identifier]*secp.PublicKey
+	EncShares   map[Identifier]secp.ModNScalar // aggregated enc_secshare per recipient
+	Certificate map[Identifier]*schnorr.Signature
 }
 
 // ParticipantStep1 runs round 1: it produces the VSS commitment + proof of
@@ -268,32 +288,26 @@ func ParticipantFinalize(
 }
 
 // VerifyCertificate checks the collected signatures form a valid success
-// certificate over eqInput and returns the RecoveryData. It rebuilds the
-// transcript so the recovery blob is self-contained.
+// certificate over eqInput and assembles the (self-contained, recoverable)
+// RecoveryData. encShares are the aggregated per-recipient encrypted shares.
 func VerifyCertificate(
 	p SessionParams,
 	eqInput [32]byte,
 	sigs map[Identifier]*schnorr.Signature,
 	round1All map[Identifier]Round1Package,
 	ephPubs map[Identifier]*secp.PublicKey,
+	encShares map[Identifier]secp.ModNScalar,
 ) (RecoveryData, error) {
 
 	if err := CertEqVerifyAll(eqInput, sigs, p.HostPubs, int(p.N)); err != nil {
 		return RecoveryData{}, err
 	}
 
-	group, pkp, err := groupCommitment(p, round1All)
-	if err != nil {
-		return RecoveryData{}, err
-	}
-	_, transcript, err := BuildEqInput(p, round1All, ephPubs, group, pkp.VerifyingKey)
-	if err != nil {
-		return RecoveryData{}, err
-	}
-
-	cert := make(map[Identifier][]byte, len(sigs))
-	for id, sig := range sigs {
-		cert[id] = sig.Serialize()
-	}
-	return RecoveryData{Transcript: transcript, Certificate: cert}, nil
+	return RecoveryData{
+		Params:      p,
+		Round1:      round1All,
+		EphPubs:     ephPubs,
+		EncShares:   encShares,
+		Certificate: sigs,
+	}, nil
 }

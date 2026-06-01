@@ -24,12 +24,12 @@ const CoordinatorAddr = "coordinator"
 
 // Message type tags.
 const (
-	msgRound1   = "round1"   // participant -> coordinator
-	msgCmsg1    = "cmsg1"    // coordinator -> all (broadcast)
-	msgEnc2     = "enc2"     // participant -> coordinator
-	msgEncShare = "encshare" // coordinator -> participant
-	msgCert     = "cert"     // participant -> coordinator
-	msgCertSet  = "certset"  // coordinator -> all (broadcast)
+	msgRound1    = "round1"    // participant -> coordinator
+	msgCmsg1     = "cmsg1"     // coordinator -> all (broadcast)
+	msgEncRound2 = "encround2" // participant -> coordinator: encrypted round-2 shares
+	msgEncShares = "encshares" // coordinator -> all (broadcast): aggregated shares
+	msgCert      = "cert"      // participant -> coordinator
+	msgCertSet   = "certset"   // coordinator -> all (broadcast)
 
 	// Blame / investigation (abort path).
 	msgInvRequest = "invreq"  // participant -> coordinator (finalize failed)
