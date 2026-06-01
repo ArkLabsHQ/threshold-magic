@@ -6,6 +6,7 @@ import (
 	"io"
 
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4/schnorr"
 )
 
 // EncPedPop masks each PedPop share with an additive pad so shares can travel
@@ -18,6 +19,7 @@ import (
 const (
 	tagEcdhPad = "thresholdmagic/encpedpop/ecdh"
 	tagSelfPad = "thresholdmagic/encpedpop/self"
+	tagRound2  = "thresholdmagic/encpedpop/round2"
 )
 
 var (
@@ -93,16 +95,54 @@ func selfPad(hostSk *secp.PrivateKey, sessionID []byte) secp.ModNScalar {
 	return modNFromBytesAllowZero(h[:])
 }
 
-// EncRound2 holds one sender's per-recipient ciphertexts, keyed by recipient and
-// including the sender's own entry (masked with selfPad) so the coordinator sums
-// uniformly over all N.
-type EncRound2 struct {
-	Ciphertexts map[Identifier]secp.ModNScalar
+// AuthenticatedShare is one sender's ciphertext for one recipient, signed under
+// the sender's host key so the recipient can confirm during investigation that it
+// came from that sender unaltered (a relaying coordinator cannot forge it).
+type AuthenticatedShare struct {
+	Ciphertext secp.ModNScalar
+	Sig        *schnorr.Signature
 }
 
-// EncPedPopRound2 runs DKGPart2 (verifies peers' proofs of knowledge, computes
-// the shares f_i(ℓ)) then masks each share with its pad. hostSk is the sender's
-// own host key; hostPubs maps each recipient to its host public key.
+// round2SigHash binds a ciphertext to its sender, recipient, session, and the
+// sender's ephemeral key (the last prevents an ephemeral-key swap from reframing it).
+func round2SigHash(sessionID []byte, sender, recipient Identifier, ephPub *secp.PublicKey, ct secp.ModNScalar) [32]byte {
+	ctb := ct.Bytes()
+	return taggedHash(
+		tagRound2,
+		sessionID,
+		sender.Serialize(),
+		recipient.Serialize(),
+		ephPub.SerializeCompressed(),
+		ctb[:],
+	)
+}
+
+// SignRound2Share produces the sender's BIP340 signature authenticating a round-2
+// ciphertext. It is applied automatically by EncPedPopRound2.
+func SignRound2Share(hostSk *secp.PrivateKey, sessionID []byte, sender, recipient Identifier, ephPub *secp.PublicKey, ct secp.ModNScalar) (*schnorr.Signature, error) {
+	h := round2SigHash(sessionID, sender, recipient, ephPub, ct)
+	return schnorr.Sign(hostSk, h[:])
+}
+
+// VerifyRound2Share verifies a SignRound2Share signature under the sender's host key.
+func VerifyRound2Share(hostPub *secp.PublicKey, sessionID []byte, sender, recipient Identifier, ephPub *secp.PublicKey, ct secp.ModNScalar, sig *schnorr.Signature) bool {
+	if sig == nil || hostPub == nil || ephPub == nil {
+		return false
+	}
+	h := round2SigHash(sessionID, sender, recipient, ephPub, ct)
+	return sig.Verify(h[:], hostPub)
+}
+
+// EncRound2 holds one sender's per-recipient authenticated ciphertexts, keyed by
+// recipient and including the sender's own entry (masked with selfPad) so the
+// coordinator sums uniformly over all N.
+type EncRound2 struct {
+	Shares map[Identifier]AuthenticatedShare
+}
+
+// EncPedPopRound2 runs DKGPart2, masks each share with its pad, and signs each
+// ciphertext under hostSk (the sender's host key) for later authentication.
+// hostPubs maps each recipient to its host public key.
 func EncPedPopRound2(
 	r1secret Round1SecretPackage,
 	round1Pkgs map[Identifier]Round1Package,
@@ -117,7 +157,17 @@ func EncPedPopRound2(
 		return Round2SecretPackage{}, EncRound2{}, err
 	}
 
-	ciphertexts := make(map[Identifier]secp.ModNScalar, len(plainShares)+1)
+	sender := r1secret.Identifier
+	shares := make(map[Identifier]AuthenticatedShare, len(plainShares)+1)
+
+	add := func(recipient Identifier, c secp.ModNScalar) error {
+		sig, err := SignRound2Share(hostSk, sessionID, sender, recipient, eph.Pub, c)
+		if err != nil {
+			return err
+		}
+		shares[recipient] = AuthenticatedShare{Ciphertext: c, Sig: sig}
+		return nil
+	}
 
 	// Peers: ECDH pad.
 	for recipient, pkg := range plainShares {
@@ -128,20 +178,24 @@ func EncPedPopRound2(
 		pad := ecdhPadSend(eph.Sk, eph.Pub, hostPub, sessionID)
 		c := (secp.ModNScalar)(pkg.SecretShare)
 		c.Add(&pad)
-		ciphertexts[recipient] = c
+		if err := add(recipient, c); err != nil {
+			return Round2SecretPackage{}, EncRound2{}, err
+		}
 	}
 
 	// Self: symmetric pad over f_i(i).
 	selfP := selfPad(hostSk, sessionID)
 	selfShare := r2secret.SecretShare // value copy
 	selfShare.Add(&selfP)
-	ciphertexts[r1secret.Identifier] = selfShare
+	if err := add(sender, selfShare); err != nil {
+		return Round2SecretPackage{}, EncRound2{}, err
+	}
 
-	return r2secret, EncRound2{Ciphertexts: ciphertexts}, nil
+	return r2secret, EncRound2{Shares: shares}, nil
 }
 
 // AggregateCiphertexts sums, per recipient, the ciphertexts from every sender.
-// ids must list all N participants.
+// ids must list all N participants. (Signatures are verified only on investigation.)
 func AggregateCiphertexts(perSender map[Identifier]EncRound2, ids []Identifier) (map[Identifier]secp.ModNScalar, error) {
 	out := make(map[Identifier]secp.ModNScalar, len(ids))
 	for _, recipient := range ids {
@@ -151,10 +205,11 @@ func AggregateCiphertexts(perSender map[Identifier]EncRound2, ids []Identifier) 
 			if !ok {
 				return nil, ErrIncorrectPackage
 			}
-			c, ok := er.Ciphertexts[recipient]
+			share, ok := er.Shares[recipient]
 			if !ok {
 				return nil, ErrIncorrectPackage
 			}
+			c := share.Ciphertext
 			sum.Add(&c)
 		}
 		out[recipient] = sum

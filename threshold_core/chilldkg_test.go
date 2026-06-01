@@ -2,6 +2,7 @@ package thresholdcore
 
 import (
 	"crypto/rand"
+	"errors"
 	"testing"
 
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
@@ -27,14 +28,15 @@ type chillParticipant struct {
 
 // chillResult is the in-process outcome of a happy-path session.
 type chillResult struct {
-	params   SessionParams
-	parts    []chillParticipant
-	round1   map[Identifier]Round1Package
-	ephPubs  map[Identifier]*secp.PublicKey
-	outputs  map[Identifier]DKGOutput
-	eqInputs map[Identifier][32]byte
-	sigs     map[Identifier]*schnorr.Signature
-	encShare map[Identifier]secp.ModNScalar
+	params    SessionParams
+	parts     []chillParticipant
+	round1    map[Identifier]Round1Package
+	ephPubs   map[Identifier]*secp.PublicKey
+	outputs   map[Identifier]DKGOutput
+	eqInputs  map[Identifier][32]byte
+	sigs      map[Identifier]*schnorr.Signature
+	encShare  map[Identifier]secp.ModNScalar
+	perSender map[Identifier]EncRound2
 }
 
 // newSecrets builds N participants with random host keys, DKG contribution
@@ -133,14 +135,15 @@ func runChillDKG(t *testing.T, min, max uint16, zeroSum bool) (chillResult, erro
 
 	// Finalize per participant.
 	res := chillResult{
-		params:   params,
-		parts:    parts,
-		round1:   round1,
-		ephPubs:  ephPubs,
-		outputs:  make(map[Identifier]DKGOutput, max),
-		eqInputs: make(map[Identifier][32]byte, max),
-		sigs:     make(map[Identifier]*schnorr.Signature, max),
-		encShare: encShare,
+		params:    params,
+		parts:     parts,
+		round1:    round1,
+		ephPubs:   ephPubs,
+		outputs:   make(map[Identifier]DKGOutput, max),
+		eqInputs:  make(map[Identifier][32]byte, max),
+		sigs:      make(map[Identifier]*schnorr.Signature, max),
+		encShare:  encShare,
+		perSender: perSender,
 	}
 	for i := range parts {
 		out, eqInput, sig, ferr := ParticipantFinalize(params, parts[i].id, encShare[parts[i].id], round1, ephPubs, parts[i].hostSk)
@@ -225,12 +228,13 @@ func TestChillDKGTamperedCiphertextFails(t *testing.T) {
 		perSender[parts[i].id] = enc
 	}
 
-	// Sender 0 corrupts the ciphertext destined for victim (participant 1).
+	// Corrupt the ciphertext destined for victim (participant 1); the aggregate
+	// check fails regardless of signatures (those are only checked on investigation).
 	sender, victim := parts[0].id, parts[1].id
-	c := perSender[sender].Ciphertexts[victim]
+	sh := perSender[sender].Shares[victim]
 	one := modNOne()
-	c.Add(&one)
-	perSender[sender].Ciphertexts[victim] = c
+	sh.Ciphertext.Add(&one)
+	perSender[sender].Shares[victim] = sh
 
 	encShare, err := CoordinatorFinalize(perSender, params.IDs())
 	require.NoError(t, err)
@@ -346,4 +350,166 @@ func TestCertEqRejectsEquivocation(t *testing.T) {
 	}
 	sigs[res.parts[1].id] = badSig
 	assert.ErrorIs(t, CertEqVerifyAll(eqInput, sigs, res.params.HostPubs, int(max)), ErrInvalidCertSignature)
+}
+
+// bumpScalar returns s + 1, for corrupting a ciphertext in tests.
+func bumpScalar(s secp.ModNScalar) secp.ModNScalar {
+	one := modNOne()
+	s.Add(&one)
+	return s
+}
+
+// corruptShare bumps a share's ciphertext but keeps its now-stale signature —
+// modelling a coordinator that alters a share it relays (it cannot re-sign).
+func corruptShare(sh AuthenticatedShare) AuthenticatedShare {
+	return AuthenticatedShare{Ciphertext: bumpScalar(sh.Ciphertext), Sig: sh.Sig}
+}
+
+// faultyShare bumps a share's ciphertext and re-signs it with the sender's host
+// key — modelling a genuinely Byzantine sender that signs an inconsistent share.
+func faultyShare(t *testing.T, sender chillParticipant, recipient Identifier, sessionID []byte, sh AuthenticatedShare) AuthenticatedShare {
+	t.Helper()
+	ct := bumpScalar(sh.Ciphertext)
+	sig, err := SignRound2Share(sender.hostSk, sessionID, sender.id, recipient, sender.eph.Pub, ct)
+	require.NoError(t, err)
+	return AuthenticatedShare{Ciphertext: ct, Sig: sig}
+}
+
+func TestInvestigateBlamesFaultySender(t *testing.T) {
+	res, err := runChillDKG(t, 2, 3, false)
+	require.NoError(t, err)
+	ids := res.params.IDs()
+
+	culprit := res.parts[0]
+	victim := res.parts[1]
+
+	// A Byzantine sender signs an inconsistent share for the victim.
+	res.perSender[culprit.id].Shares[victim.id] = faultyShare(t, culprit, victim.id, res.params.SessionID, res.perSender[culprit.id].Shares[victim.id])
+
+	agg, err := AggregateCiphertexts(res.perSender, ids)
+	require.NoError(t, err)
+	partials, err := PartialCiphertextsFor(res.perSender, victim.id, ids)
+	require.NoError(t, err)
+
+	blame := InvestigateShare(res.params, victim.id, agg[victim.id], partials, res.ephPubs, victim.hostSk, res.round1)
+	var fp *FaultyParticipantError
+	require.Truef(t, errors.As(blame, &fp), "expected FaultyParticipantError, got %v", blame)
+	assert.True(t, fp.Culprit.Equal(culprit.id), "blamed wrong participant")
+}
+
+func TestInvestigateBlamesCoordinatorOnShareTamper(t *testing.T) {
+	res, err := runChillDKG(t, 2, 3, false)
+	require.NoError(t, err)
+	ids := res.params.IDs()
+
+	sender := res.parts[0]
+	victim := res.parts[1]
+
+	// The coordinator alters an honest sender's ciphertext but cannot forge its
+	// signature, so the honest sender must NOT be framed — the coordinator is blamed.
+	res.perSender[sender.id].Shares[victim.id] = corruptShare(res.perSender[sender.id].Shares[victim.id])
+
+	agg, err := AggregateCiphertexts(res.perSender, ids)
+	require.NoError(t, err)
+	partials, err := PartialCiphertextsFor(res.perSender, victim.id, ids)
+	require.NoError(t, err)
+
+	blame := InvestigateShare(res.params, victim.id, agg[victim.id], partials, res.ephPubs, victim.hostSk, res.round1)
+	var fc *FaultyCoordinatorError
+	require.Truef(t, errors.As(blame, &fc), "expected FaultyCoordinatorError (honest sender must not be framed), got %v", blame)
+}
+
+func TestInvestigateBlamesCoordinatorOnSelfTamper(t *testing.T) {
+	res, err := runChillDKG(t, 2, 3, false)
+	require.NoError(t, err)
+	ids := res.params.IDs()
+	victim := res.parts[1]
+
+	// Corrupt the victim's own (self) ciphertext: the stale signature won't verify.
+	res.perSender[victim.id].Shares[victim.id] = corruptShare(res.perSender[victim.id].Shares[victim.id])
+
+	agg, err := AggregateCiphertexts(res.perSender, ids)
+	require.NoError(t, err)
+	partials, err := PartialCiphertextsFor(res.perSender, victim.id, ids)
+	require.NoError(t, err)
+
+	blame := InvestigateShare(res.params, victim.id, agg[victim.id], partials, res.ephPubs, victim.hostSk, res.round1)
+	var fc *FaultyCoordinatorError
+	assert.Truef(t, errors.As(blame, &fc), "expected FaultyCoordinatorError, got %v", blame)
+}
+
+func TestInvestigateBlamesCoordinatorOnAggregateMismatch(t *testing.T) {
+	res, err := runChillDKG(t, 2, 3, false)
+	require.NoError(t, err)
+	ids := res.params.IDs()
+	victim := res.parts[1]
+
+	partials, err := PartialCiphertextsFor(res.perSender, victim.id, ids)
+	require.NoError(t, err)
+
+	// Authentic parts (valid signatures), but the handed aggregate does not match.
+	wrongAgg := bumpScalar(res.encShare[victim.id])
+
+	blame := InvestigateShare(res.params, victim.id, wrongAgg, partials, res.ephPubs, victim.hostSk, res.round1)
+	var fc *FaultyCoordinatorError
+	assert.Truef(t, errors.As(blame, &fc), "expected FaultyCoordinatorError, got %v", blame)
+}
+
+func TestInvestigateInfinityKeyIsNeutral(t *testing.T) {
+	res, err := runChillDKG(t, 2, 2, true)
+	require.ErrorIs(t, err, ErrInfinityVerifyingKey)
+	ids := res.params.IDs()
+	victim := res.parts[0]
+
+	partials, err := PartialCiphertextsFor(res.perSender, victim.id, ids)
+	require.NoError(t, err)
+
+	blame := InvestigateShare(res.params, victim.id, res.encShare[victim.id], partials, res.ephPubs, victim.hostSk, res.round1)
+	assert.ErrorIs(t, blame, ErrInfinityVerifyingKey, "a zero-sum group key must blame no one")
+}
+
+func TestInvestigateDeterministicCulprit(t *testing.T) {
+	res, err := runChillDKG(t, 2, 3, false)
+	require.NoError(t, err)
+	ids := res.params.IDs()
+	victim := res.parts[1]
+
+	// Two Byzantine senders; the lowest-ordered identifier must be blamed.
+	res.perSender[res.parts[0].id].Shares[victim.id] = faultyShare(t, res.parts[0], victim.id, res.params.SessionID, res.perSender[res.parts[0].id].Shares[victim.id])
+	res.perSender[res.parts[2].id].Shares[victim.id] = faultyShare(t, res.parts[2], victim.id, res.params.SessionID, res.perSender[res.parts[2].id].Shares[victim.id])
+
+	agg, err := AggregateCiphertexts(res.perSender, ids)
+	require.NoError(t, err)
+	partials, err := PartialCiphertextsFor(res.perSender, victim.id, ids)
+	require.NoError(t, err)
+
+	blame := InvestigateShare(res.params, victim.id, agg[victim.id], partials, res.ephPubs, victim.hostSk, res.round1)
+	var fp *FaultyParticipantError
+	require.True(t, errors.As(blame, &fp))
+	want := res.parts[0].id
+	if res.parts[2].id.Less(want) {
+		want = res.parts[2].id
+	}
+	assert.True(t, fp.Culprit.Equal(want), "expected the lowest-ordered culprit")
+}
+
+func TestPartialCiphertextsFor(t *testing.T) {
+	res, err := runChillDKG(t, 2, 3, false)
+	require.NoError(t, err)
+	ids := res.params.IDs()
+	victim := res.parts[0].id
+
+	got, err := PartialCiphertextsFor(res.perSender, victim, ids)
+	require.NoError(t, err)
+	require.Len(t, got, len(ids))
+	for _, s := range ids {
+		exp := res.perSender[s].Shares[victim]
+		g := got[s]
+		assert.True(t, g.Ciphertext.Equals(&exp.Ciphertext))
+	}
+
+	// Missing sender -> error.
+	delete(res.perSender, ids[0])
+	_, err = PartialCiphertextsFor(res.perSender, victim, ids)
+	assert.ErrorIs(t, err, ErrIncorrectPackage)
 }

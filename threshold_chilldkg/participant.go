@@ -2,6 +2,7 @@ package thresholdchilldkg
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	thres "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
@@ -84,20 +85,44 @@ func (p *Participant) Run(ctx context.Context) (thres.DKGOutput, thres.RecoveryD
 	}
 
 	// Finalize: decrypt + verify share, build key packages, sign the transcript.
-	out, eqInput, sig, err := thres.ParticipantFinalize(p.Params, p.Self, encShare, round1All, ephPubs, p.HostSk)
-	if err != nil {
-		return thres.DKGOutput{}, thres.RecoveryData{}, err
+	out, eqInput, sig, ferr := thres.ParticipantFinalize(p.Params, p.Self, encShare, round1All, ephPubs, p.HostSk)
+	if ferr != nil {
+		// Request the per-sender ciphertexts to attribute the fault. Sent
+		// unconditionally so the coordinator's phase-3 count stays exact.
+		if err := p.Transport.SendTo(ctx, p.coord(), Message{Type: msgInvRequest}); err != nil {
+			return thres.DKGOutput{}, thres.RecoveryData{}, err
+		}
+		invMsg, err := waitFor(ctx, p.Transport.Inbox(), msgInvData)
+		if err != nil {
+			// A coordinator that withholds investigation data is itself faulty.
+			return thres.DKGOutput{}, thres.RecoveryData{}, &thres.FaultyCoordinatorError{Reason: "no investigation data"}
+		}
+		// Only a share mismatch is attributable; other failures are returned as-is.
+		if !errors.Is(ferr, thres.ErrInvalidSecretShare) {
+			return thres.DKGOutput{}, thres.RecoveryData{}, ferr
+		}
+		partials, err := unmarshalAuthShares(invMsg.Payload)
+		if err != nil {
+			return thres.DKGOutput{}, thres.RecoveryData{}, err
+		}
+		// Use the cmsg1-retained round1All/ephPubs (never coordinator-resupplied).
+		blame := thres.InvestigateShare(p.Params, p.Self, encShare, partials, ephPubs, p.HostSk, round1All)
+		return thres.DKGOutput{}, thres.RecoveryData{}, blame
 	}
+
 	if err := p.Transport.SendTo(ctx, p.coord(), Message{Type: msgCert, Payload: sig.Serialize()}); err != nil {
 		return thres.DKGOutput{}, thres.RecoveryData{}, err
 	}
 
-	// Receive the full success certificate and verify it.
-	certMsg, err := waitFor(ctx, p.Transport.Inbox(), msgCertSet)
+	// Await the success certificate or an abort (another participant faulted).
+	m, err := waitForAny(ctx, p.Transport.Inbox(), msgCertSet, msgAbort)
 	if err != nil {
 		return thres.DKGOutput{}, thres.RecoveryData{}, err
 	}
-	sigs, err := unmarshalCertSet(certMsg.Payload)
+	if m.Type == msgAbort {
+		return thres.DKGOutput{}, thres.RecoveryData{}, ErrCeremonyAborted
+	}
+	sigs, err := unmarshalCertSet(m.Payload)
 	if err != nil {
 		return thres.DKGOutput{}, thres.RecoveryData{}, err
 	}

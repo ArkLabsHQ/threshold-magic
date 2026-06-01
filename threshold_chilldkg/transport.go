@@ -30,6 +30,11 @@ const (
 	msgEncShare = "encshare" // coordinator -> participant
 	msgCert     = "cert"     // participant -> coordinator
 	msgCertSet  = "certset"  // coordinator -> all (broadcast)
+
+	// Blame / investigation (abort path).
+	msgInvRequest = "invreq"  // participant -> coordinator (finalize failed)
+	msgInvData    = "invdata" // coordinator -> participant (per-sender ciphertexts)
+	msgAbort      = "abort"   // coordinator -> all (broadcast): ceremony aborted
 )
 
 // Transport is the pluggable message channel a Session drives the protocol over.

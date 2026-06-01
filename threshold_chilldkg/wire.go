@@ -3,6 +3,7 @@ package thresholdchilldkg
 import (
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 
 	thres "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
@@ -135,34 +136,69 @@ func unmarshalCmsg1(payload []byte) (map[thres.Identifier]thres.Round1Package, m
 	return round1, ephPubs, nil
 }
 
-// --- enc2 (participant -> coordinator) ---
+// --- authenticated shares (round-2 ciphertext + signature) ---
 
-func marshalEnc2(enc thres.EncRound2) ([]byte, error) {
-	m := make(map[string]string, len(enc.Ciphertexts))
-	for id, c := range enc.Ciphertexts {
-		m[addrOf(id)] = scalarToHex(c)
+// authShareWire is the wire form of an AuthenticatedShare, shared by enc2 and
+// invData (both are maps of identifier -> ciphertext+signature).
+type authShareWire struct {
+	Ct  string `json:"ct"`
+	Sig string `json:"sig"`
+}
+
+func marshalAuthShares(shares map[thres.Identifier]thres.AuthenticatedShare) ([]byte, error) {
+	m := make(map[string]authShareWire, len(shares))
+	for id, sh := range shares {
+		if sh.Sig == nil {
+			return nil, fmt.Errorf("authenticated share for %s has no signature", id)
+		}
+		m[addrOf(id)] = authShareWire{
+			Ct:  scalarToHex(sh.Ciphertext),
+			Sig: hex.EncodeToString(sh.Sig.Serialize()),
+		}
 	}
 	return json.Marshal(m)
 }
 
-func unmarshalEnc2(payload []byte) (thres.EncRound2, error) {
-	var m map[string]string
+func unmarshalAuthShares(payload []byte) (map[thres.Identifier]thres.AuthenticatedShare, error) {
+	var m map[string]authShareWire
 	if err := json.Unmarshal(payload, &m); err != nil {
-		return thres.EncRound2{}, err
+		return nil, err
 	}
-	out := thres.EncRound2{Ciphertexts: make(map[thres.Identifier]secp.ModNScalar, len(m))}
-	for addr, s := range m {
+	out := make(map[thres.Identifier]thres.AuthenticatedShare, len(m))
+	for addr, w := range m {
 		id, err := idOf(addr)
 		if err != nil {
-			return thres.EncRound2{}, err
+			return nil, err
 		}
-		c, err := hexToScalar(s)
+		c, err := hexToScalar(w.Ct)
 		if err != nil {
-			return thres.EncRound2{}, err
+			return nil, err
 		}
-		out.Ciphertexts[id] = c
+		sb, err := hex.DecodeString(w.Sig)
+		if err != nil {
+			return nil, err
+		}
+		sig, err := schnorr.ParseSignature(sb)
+		if err != nil {
+			return nil, err
+		}
+		out[id] = thres.AuthenticatedShare{Ciphertext: c, Sig: sig}
 	}
 	return out, nil
+}
+
+// --- enc2 (participant -> coordinator) ---
+
+func marshalEnc2(enc thres.EncRound2) ([]byte, error) {
+	return marshalAuthShares(enc.Shares)
+}
+
+func unmarshalEnc2(payload []byte) (thres.EncRound2, error) {
+	shares, err := unmarshalAuthShares(payload)
+	if err != nil {
+		return thres.EncRound2{}, err
+	}
+	return thres.EncRound2{Shares: shares}, nil
 }
 
 // --- certset (coordinator -> all) ---
