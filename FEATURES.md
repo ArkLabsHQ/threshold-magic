@@ -2,8 +2,9 @@
 
 A Go threshold-signature toolkit over secp256k1 (decred `dcrec/secp256k1/v4`):
 FROST distributed key generation and signing, plus a **ChillDKG** layer
-(encrypted PedPop + a certifying equality check) and a transport-agnostic SDK to
-run a full DKG ceremony over any message channel.
+(encrypted PedPop + a certifying equality check), a transport-agnostic SDK to
+run a full DKG ceremony over any message channel, and an embeddable SDK wiring the
+gRPC transport with BadgerDB persistence.
 
 ## Modules (`go.work` workspace)
 
@@ -12,6 +13,8 @@ run a full DKG ceremony over any message channel.
 | `threshold_core` | `thresholdcore` | Pure crypto/protocol: PedPop DKG, ChillDKG steps, EncPedPop, CertEq, blame. No I/O. |
 | `threshold_frost` | `threshold_signing` | RFC 9591 FROST signing (nonces, binding factors, sign, aggregate, verify). |
 | `threshold_chilldkg` | `thresholdchilldkg` | Transport-agnostic SDK: `Transport` interface, in-memory `MemHub`, Participant/Coordinator session drivers. |
+| `threshold_chilldkg/grpc` | `chillgrpc` | gRPC `Transport` adapter (insecure): coordinator relay `Server` + participant `Client`. Own module to isolate grpc/protobuf deps. |
+| `threshold_sdk` | `thresholdsdk` | Embeddable SDK: wires the gRPC transport + ChillDKG drivers + BadgerDB persistence behind a small programmatic API (host secret as a parameter, injectable `Store`). Own module to isolate the BadgerDB dependency. |
 | `threshold_nostrdkg` | `thresholdnostrdkg` | Legacy Nostr-transport DKG driver (independent; not part of the ChillDKG SDK). |
 
 ---
@@ -66,6 +69,8 @@ When a recipient's aggregate share fails to verify, attribution recovers *who* i
 - **`Participant`** ([participant.go](threshold_chilldkg/participant.go)) and **`Coordinator`** ([coordinator.go](threshold_chilldkg/coordinator.go)) drive a full ceremony over the pure step functions: round 1 → cmsg1 broadcast → encrypted round 2 → aggregate → finalize → CertEq. Both `Run` methods return the `RecoveryData` blob (the coordinator so it can serve it; participants for their own backup).
 - **Byzantine-robust collection** — `collectFromAll` counts **distinct, authenticated senders** (membership-filtered, first-message-wins), so a participant flooding duplicates cannot starve another's slot.
 - **Investigation round-trip** — a participant whose finalize fails sends `msgInvRequest`; the coordinator replies point-to-point with the per-sender authenticated ciphertexts (`msgInvData`); the failing participant returns the typed culprit error. Other participants receive `msgAbort` and return `ErrCeremonyAborted`. A withheld `msgInvData` is normalized to `FaultyCoordinatorError`.
+- **gRPC transport** (separate module `thresholdchilldkggrpc`, [threshold_chilldkg/grpc](threshold_chilldkg/grpc)) — a real network `Transport` matching the star topology: the coordinator runs a gRPC relay (`Server`), each participant a `Client` that sends via a unary `Send` and receives via a server-streaming `Subscribe`. Faithfully reproduces `MemHub` semantics (the `Server` pre-creates a buffered queue per participant so a broadcast is held for a not-yet-subscribed member). **Insecure (no TLS) for now**; kept in its own module so grpc/protobuf deps stay out of the core SDK.
+- **Embeddable SDK** (separate module `thresholdsdk`, [threshold_sdk](threshold_sdk)) — packages running a ceremony behind a small, programmatic API (no env vars, no config files, no daemon). `NewCoordinator(params, listenAddr, store)` runs the relay and persists the blob; `NewParticipant(params, hostSk, coordinatorAddr, store)` finds its own identifier by host-pubkey match, generates fresh per-run contribution randomness, runs the DKG over gRPC, and persists. Persistence goes through an **injectable `Store`** (BadgerDB implementation provided, in-memory for tests) and holds **only the public `RecoveryData` blob — no secret at rest**: `LoadKeyPackage` reconstructs the key package on demand via `RecoverShare` (host key + blob), which re-verifies the success certificate and re-checks the share against the certified commitment. `Run` is idempotent per `params_id`.
 
 ## 4. Trust model & security properties
 
@@ -79,12 +84,14 @@ When a recipient's aggregate share fails to verify, attribution recovers *who* i
 
 - **`cmsg1`-equivocation binding** (e.g. an `eq_input` comparison step) for full blame soundness on an adversarial *network* transport.
 - **Automated retry** excluding an identified culprit (identifiable-abort → re-run).
-- A first-class **network transport adapter** (the SDK is transport-agnostic; only the in-memory `MemHub` ships here).
+- **TLS/mTLS + auth for the gRPC transport** (it ships **insecure** today); plus reconnect/resilience for the participant stream.
 
 ## 6. Tests
 
 - `threshold_core`: PedPop dealer DKG; ChillDKG end-to-end (reconstruct == Σ secrets, group-key agreement, certificate verify); pad round-trip; eq_input determinism/tamper; CertEq equivocation; blame attribution (faulty sender, coordinator share-tamper, self-tamper, aggregate mismatch, infinity-neutral, deterministic culprit); `PartialCiphertextsFor`; recovery (RecoverShare reproduces each KeyPackage from host key alone, canonical Serialize/Parse round-trip, tampered-share error, foreign/nil host-key guards, tampered-cert rejection).
 - `threshold_frost`: FROST sign+aggregate over ChillDKG-produced keys.
 - `threshold_chilldkg`: full session over `MemHub`; coordinator-share-tamper ⇒ coordinator blamed (honest sender not framed); withheld investigation data ⇒ coordinator blamed; duplicate-flood ⇒ deduped and ceremony succeeds; recovery (all participants' blobs byte-identical, round-trip, `RecoverShare` reproduces each key).
+- `thresholdchilldkggrpc`: full DKG end-to-end over a real gRPC listener (2-of-3, 3-of-5) with blobs byte-identical to the coordinator's and `RecoverShare` reproducing each key; late subscriber still succeeds (pre-created buffers); missing participant times out cleanly; server admission guards (empty/unknown addr, empty To).
+- `thresholdsdk`: full ceremony over a real gRPC listener with BadgerDB stores (2-of-3, 3-of-5) — every participant's stored blob byte-identical to the coordinator's, and `LoadKeyPackage`/`RecoverShare` reproduce each share from the blob + host key; host key absent from params ⇒ `ErrSelfNotInParams`; `HostKeyFromHex` length/zero guards; idempotent re-run; missing participant times out cleanly with nothing persisted.
 
-Run: `cd threshold-magic && for m in threshold_core threshold_frost threshold_chilldkg; do go test -C $m ./...; done`
+Run: `cd threshold-magic && for m in threshold_core threshold_frost threshold_chilldkg threshold_chilldkg/grpc threshold_sdk; do go test -C $m ./...; done`

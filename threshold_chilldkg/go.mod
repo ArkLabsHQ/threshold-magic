@@ -9,7 +9,10 @@ require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
 )
 
-require github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
+require (
+	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
+	github.com/kr/text v0.2.0 // indirect
+)
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
