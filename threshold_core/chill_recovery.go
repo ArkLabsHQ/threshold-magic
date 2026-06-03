@@ -7,7 +7,7 @@ import (
 	"errors"
 
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
-	"github.com/decred/dcrd/dcrec/secp256k1/v4/schnorr"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 )
 
 // Share recovery from a RecoveryData blob, plus its canonical serialization.
@@ -72,7 +72,7 @@ func RecoverShare(rd RecoveryData, hostSk *secp.PrivateKey) (DKGOutput, error) {
 	if !ok {
 		return DKGOutput{}, ErrIncorrectPackage
 	}
-	share, err := DecryptAndVerifyShare(self, enc, rd.Params.IDs(), rd.EphPubs, hostSk, rd.Params.SessionID, group)
+	share, err := DecryptAndVerifyShare(self, enc, rd.Params, rd.EphPubs, hostSk, group)
 	if err != nil {
 		return DKGOutput{}, err
 	}

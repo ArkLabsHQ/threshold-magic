@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
-	"github.com/decred/dcrd/dcrec/secp256k1/v4/schnorr"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -287,7 +287,7 @@ func TestChillDKGCrossSessionReplayFails(t *testing.T) {
 
 	group, _, err := groupCommitment(res.params, res.round1)
 	require.NoError(t, err)
-	_, err = DecryptAndVerifyShare(victim.id, res.encShare[victim.id], res.params.IDs(), otherEphPubs, victim.hostSk, res.params.SessionID, group)
+	_, err = DecryptAndVerifyShare(victim.id, res.encShare[victim.id], res.params, otherEphPubs, victim.hostSk, group)
 	assert.ErrorIs(t, err, ErrInvalidSecretShare, "ciphertexts bound to other ephemeral keys must not validate")
 }
 

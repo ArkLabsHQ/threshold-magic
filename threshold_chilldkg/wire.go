@@ -8,6 +8,7 @@ import (
 	thres "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/schnorr"
+	bipschnorr "github.com/btcsuite/btcd/btcec/v2/schnorr"
 )
 
 // Wire (de)serialization between thresholdcore values and transport payloads.
@@ -203,7 +204,7 @@ func unmarshalEnc2(payload []byte) (thres.EncRound2, error) {
 
 // --- certset (coordinator -> all) ---
 
-func marshalCertSet(sigs map[thres.Identifier]*schnorr.Signature) ([]byte, error) {
+func marshalCertSet(sigs map[thres.Identifier]*bipschnorr.Signature) ([]byte, error) {
 	m := make(map[string]string, len(sigs))
 	for id, sig := range sigs {
 		m[addrOf(id)] = hex.EncodeToString(sig.Serialize())
@@ -211,12 +212,12 @@ func marshalCertSet(sigs map[thres.Identifier]*schnorr.Signature) ([]byte, error
 	return json.Marshal(m)
 }
 
-func unmarshalCertSet(payload []byte) (map[thres.Identifier]*schnorr.Signature, error) {
+func unmarshalCertSet(payload []byte) (map[thres.Identifier]*bipschnorr.Signature, error) {
 	var m map[string]string
 	if err := json.Unmarshal(payload, &m); err != nil {
 		return nil, err
 	}
-	out := make(map[thres.Identifier]*schnorr.Signature, len(m))
+	out := make(map[thres.Identifier]*bipschnorr.Signature, len(m))
 	for addr, s := range m {
 		id, err := idOf(addr)
 		if err != nil {
@@ -226,7 +227,7 @@ func unmarshalCertSet(payload []byte) (map[thres.Identifier]*schnorr.Signature, 
 		if err != nil {
 			return nil, err
 		}
-		sig, err := schnorr.ParseSignature(b)
+		sig, err := bipschnorr.ParseSignature(b)
 		if err != nil {
 			return nil, err
 		}

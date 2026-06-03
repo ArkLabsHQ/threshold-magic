@@ -4,7 +4,7 @@ import (
 	"errors"
 
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
-	"github.com/decred/dcrd/dcrec/secp256k1/v4/schnorr"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 )
 
 // CertEq is the certifying equality check from ChillDKG: each participant

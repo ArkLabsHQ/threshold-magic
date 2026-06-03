@@ -5,7 +5,7 @@ import (
 
 	thres "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
-	"github.com/decred/dcrd/dcrec/secp256k1/v4/schnorr"
+	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 )
 
 // Coordinator runs the untrusted aggregator side of the ChillDKG protocol. It

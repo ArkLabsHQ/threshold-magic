@@ -125,14 +125,17 @@ func InvestigateShare(
 	}
 
 	// Per-sender check in sorted order (deterministic culprit). Each ciphertext is
-	// now authenticated, so a failure is a genuinely faulty sender.
+	// now authenticated, so a failure is a genuinely faulty sender. As the recipient
+	// (self), every pad shares one context_ keyed by self's index (decaps_multi).
 	myHostPub := myHostSk.PubKey()
+	encCtx, idxOf := p.encryptionContext()
+	ctx := padContext(idxOf[self], encCtx)
 	for _, id := range senders {
 		var pad secp.ModNScalar
 		if id.Equal(self) {
-			pad = selfPad(myHostSk, p.SessionID, ephPubs[id])
+			pad = selfPad(myHostSk, ephPubs[id], ctx)
 		} else {
-			pad = ecdhPadRecv(myHostSk, ephPubs[id], myHostPub, p.SessionID)
+			pad = ecdhPadRecv(myHostSk, ephPubs[id], myHostPub, ctx)
 		}
 
 		// f_i(self) = c_iℓ − pad_iℓ
