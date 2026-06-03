@@ -89,9 +89,12 @@ func ecdhPadRecv(recipientHostSk *secp.PrivateKey, ephPub, recipientHostPub *sec
 
 // selfPad masks the share a participant produces for itself (i == ℓ). No ECDH:
 // the same party adds and removes it, so a keyed hash of its own secret suffices.
-func selfPad(hostSk *secp.PrivateKey, sessionID []byte) secp.ModNScalar {
+// The fresh per-session ephemeral key is bound in (as the spec's self_pad binds
+// its nonce) so the pad is unique per ceremony even though sessionID (params_id)
+// is deterministic; ephPub is the party's own round-1 ephemeral key.
+func selfPad(hostSk *secp.PrivateKey, sessionID []byte, ephPub *secp.PublicKey) secp.ModNScalar {
 	skb := hostSk.Serialize()
-	h := taggedHash(tagSelfPad, skb, sessionID)
+	h := taggedHash(tagSelfPad, skb, sessionID, ephPub.SerializeCompressed())
 	return modNFromBytesAllowZero(h[:])
 }
 
@@ -183,8 +186,8 @@ func EncPedPopRound2(
 		}
 	}
 
-	// Self: symmetric pad over f_i(i).
-	selfP := selfPad(hostSk, sessionID)
+	// Self: symmetric pad over f_i(i), bound to this party's fresh ephemeral key.
+	selfP := selfPad(hostSk, sessionID, eph.Pub)
 	selfShare := r2secret.SecretShare // value copy
 	selfShare.Add(&selfP)
 	if err := add(sender, selfShare); err != nil {
@@ -244,7 +247,11 @@ func DecryptAndVerifyShare(
 	var sumPads secp.ModNScalar
 	for _, sender := range senders {
 		if sender.Equal(self) {
-			p := selfPad(myHostSk, sessionID)
+			ephPub, ok := ephPubs[self]
+			if !ok {
+				return SecretShare(modNZero()), ErrMissingEphKey
+			}
+			p := selfPad(myHostSk, sessionID, ephPub)
 			sumPads.Add(&p)
 			continue
 		}

@@ -45,17 +45,10 @@ func NewCoordinator(params core.SessionParams, listenAddr string, store Store) (
 // Addr is the resolved listen address; participants dial it.
 func (c *Coordinator) Addr() net.Addr { return c.lis.Addr() }
 
-// Run serves the relay and drives the ceremony, persisting the RecoveryData blob
-// before returning it. If a blob is already stored for these params, it is parsed
-// and returned without re-running.
+// Run serves the relay and drives the ceremony, then persists the RecoveryData
+// blob keyed by the group verifying key it produced and returns it. Each call
+// runs a fresh ceremony (a new key); it is not idempotent.
 func (c *Coordinator) Run(ctx context.Context) (core.RecoveryData, error) {
-	switch blob, err := c.store.GetRecovery(c.params.SessionID); {
-	case err == nil:
-		return core.ParseRecoveryData(blob)
-	case !errors.Is(err, ErrNotFound):
-		return core.RecoveryData{}, err
-	}
-
 	c.srv.Start()
 	rd, err := (&chill.Coordinator{Params: c.params, Transport: c.srv}).Run(ctx)
 	if err != nil {
@@ -65,7 +58,15 @@ func (c *Coordinator) Run(ctx context.Context) (core.RecoveryData, error) {
 	if err != nil {
 		return core.RecoveryData{}, err
 	}
-	if err := c.store.PutRecovery(c.params.SessionID, blob); err != nil {
+	vk, err := rd.GroupVerifyingKey()
+	if err != nil {
+		return core.RecoveryData{}, err
+	}
+	groupKey, err := vk.SerializeCompressed()
+	if err != nil {
+		return core.RecoveryData{}, err
+	}
+	if err := c.store.PutRecovery(groupKey, blob); err != nil {
 		return core.RecoveryData{}, err
 	}
 	return rd, nil

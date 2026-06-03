@@ -10,19 +10,22 @@ import (
 var ErrNotFound = errors.New("thresholdsdk: not found")
 
 // Store persists ceremony outputs — the public RecoveryData blob, keyed by the
-// session id (SessionParams.SessionID, i.e. the deterministic params_id). No
-// secret material is stored: a participant's share is recovered on demand from
-// the blob plus its host key.
+// group verifying key (the 33-byte compressed threshold public key the ceremony
+// produced). One entry per produced key; a key-refresh updates the same entry,
+// and the same participant set can hold several distinct keys. No secret material
+// is stored: a participant's share is recovered on demand from the blob plus its
+// host key.
 type Store interface {
-	PutRecovery(sessionID, blob []byte) error
-	GetRecovery(sessionID []byte) ([]byte, error)
-	Has(sessionID []byte) (bool, error)
+	PutRecovery(groupKey, blob []byte) error
+	GetRecovery(groupKey []byte) ([]byte, error)
+	Has(groupKey []byte) (bool, error)
+	List() ([][]byte, error) // the group keys currently stored
 	Close() error
 }
 
 const recoveryPrefix = "recovery/"
 
-func recoveryKey(sessionID []byte) []byte { return append([]byte(recoveryPrefix), sessionID...) }
+func recoveryKey(groupKey []byte) []byte { return append([]byte(recoveryPrefix), groupKey...) }
 
 // badgerStore is a BadgerDB-backed Store.
 type badgerStore struct {
@@ -67,15 +70,15 @@ func (s *badgerStore) get(key []byte) ([]byte, error) {
 	return out, nil
 }
 
-func (s *badgerStore) PutRecovery(sessionID, blob []byte) error {
-	return s.put(recoveryKey(sessionID), blob)
+func (s *badgerStore) PutRecovery(groupKey, blob []byte) error {
+	return s.put(recoveryKey(groupKey), blob)
 }
-func (s *badgerStore) GetRecovery(sessionID []byte) ([]byte, error) {
-	return s.get(recoveryKey(sessionID))
+func (s *badgerStore) GetRecovery(groupKey []byte) ([]byte, error) {
+	return s.get(recoveryKey(groupKey))
 }
 
-func (s *badgerStore) Has(sessionID []byte) (bool, error) {
-	_, err := s.GetRecovery(sessionID)
+func (s *badgerStore) Has(groupKey []byte) (bool, error) {
+	_, err := s.GetRecovery(groupKey)
 	if errors.Is(err, ErrNotFound) {
 		return false, nil
 	}
@@ -83,6 +86,27 @@ func (s *badgerStore) Has(sessionID []byte) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// List returns the group keys currently stored (prefix scan; values not loaded).
+func (s *badgerStore) List() ([][]byte, error) {
+	prefix := []byte(recoveryPrefix)
+	var keys [][]byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			k := it.Item().KeyCopy(nil)
+			keys = append(keys, k[len(prefix):])
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return keys, nil
 }
 
 func (s *badgerStore) Close() error { return s.db.Close() }

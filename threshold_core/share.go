@@ -39,6 +39,17 @@ func (vk VerifyingKey) Verify(message []byte, signature Signature) bool {
 	return left.EquivalentNonConst(&right)
 }
 
+// SerializeCompressed encodes the group verifying key as a 33-byte compressed
+// secp256k1 point. It errors on the point at infinity (never a valid group key).
+func (vk VerifyingKey) SerializeCompressed() ([]byte, error) {
+	if isInfinity(vk.E) {
+		return nil, ErrInfinityVerifyingKey
+	}
+	e := vk.E // value copy; ToAffine normalizes it in place
+	e.ToAffine()
+	return secp.NewPublicKey(&e.X, &e.Y).SerializeCompressed(), nil
+}
+
 // Verify share against VSS; returns (verifying_share_i, group_verifying_key)
 func (s ThresholdShare) Verify() (VerifyingShare, VerifyingKey, error) {
 	left := elemBaseMul((*secp.ModNScalar)(&s.SecretSh)) // g * f(i)

@@ -130,7 +130,7 @@ func InvestigateShare(
 	for _, id := range senders {
 		var pad secp.ModNScalar
 		if id.Equal(self) {
-			pad = selfPad(myHostSk, p.SessionID)
+			pad = selfPad(myHostSk, p.SessionID, ephPubs[id])
 		} else {
 			pad = ecdhPadRecv(myHostSk, ephPubs[id], myHostPub, p.SessionID)
 		}

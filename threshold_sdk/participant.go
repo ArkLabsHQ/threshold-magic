@@ -84,15 +84,10 @@ func identify(params core.SessionParams, pub *secp.PublicKey) (core.Identifier, 
 	return core.Identifier{}, ErrSelfNotInParams
 }
 
-// Run executes the ceremony over gRPC and persists the outputs, returning the key
-// package. If a completed result is already stored for these params, it is
-// returned without re-running.
+// Run executes the ceremony over gRPC and persists the public RecoveryData blob
+// keyed by the produced group verifying key, returning the key package. Each call
+// runs a fresh ceremony (a new key); it is not idempotent.
 func (p *Participant) Run(ctx context.Context) (core.KeyPackage, error) {
-	// Idempotent: a completed, recoverable result short-circuits the ceremony.
-	if kp, err := p.LoadKeyPackage(); err == nil {
-		return kp, nil
-	}
-
 	// Fresh per-run contribution material — never derived from the host key.
 	sec, err := secp.GeneratePrivateKey()
 	if err != nil {
@@ -130,19 +125,23 @@ func (p *Participant) Run(ctx context.Context) (core.KeyPackage, error) {
 	if err != nil {
 		return core.KeyPackage{}, err
 	}
-	if err := p.store.PutRecovery(p.params.SessionID, blob); err != nil {
+	groupKey, err := out.Key.VerifyingKey.SerializeCompressed()
+	if err != nil {
+		return core.KeyPackage{}, err
+	}
+	if err := p.store.PutRecovery(groupKey, blob); err != nil {
 		return core.KeyPackage{}, err
 	}
 	return out.Key, nil
 }
 
-// LoadKeyPackage reconstructs the participant's key package from storage by
-// parsing the stored RecoveryData and recovering the output with the host secret.
-// RecoverShare re-verifies the success certificate and re-checks the share
-// against the certified group commitment, so the returned package is trusted
-// without any secret being kept at rest.
-func (p *Participant) LoadKeyPackage() (core.KeyPackage, error) {
-	blob, err := p.store.GetRecovery(p.params.SessionID)
+// LoadKeyPackage reconstructs the key package for the given group verifying key
+// (33-byte compressed) from storage: it parses the stored RecoveryData and
+// recovers the share with the host secret. RecoverShare re-verifies the success
+// certificate and re-checks the share against the certified group commitment, so
+// the returned package is trusted without any secret being kept at rest.
+func (p *Participant) LoadKeyPackage(groupKey []byte) (core.KeyPackage, error) {
+	blob, err := p.store.GetRecovery(groupKey)
 	if err != nil {
 		return core.KeyPackage{}, err
 	}

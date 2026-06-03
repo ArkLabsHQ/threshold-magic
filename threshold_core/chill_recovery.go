@@ -88,6 +88,18 @@ func RecoverShare(rd RecoveryData, hostSk *secp.PrivateKey) (DKGOutput, error) {
 	return DKGOutput{Key: kp, Public: pkp}, nil
 }
 
+// GroupVerifyingKey returns the group verifying key (the threshold public key)
+// derived from the recovery data's round-1 commitments. It is public information
+// and needs no secret, so a coordinator can compute it to index stored recovery
+// data by the key it produced.
+func (rd RecoveryData) GroupVerifyingKey() (VerifyingKey, error) {
+	_, pkp, err := groupCommitment(rd.Params, rd.Round1)
+	if err != nil {
+		return VerifyingKey{}, err
+	}
+	return pkp.VerifyingKey, nil
+}
+
 // recoveryWire is the canonical wire form of RecoveryData: hex strings and
 // Round1Package's own JSON only — never a raw secp type (whose unexported fields
 // marshal to {}). Hex-identifier map keys make Go's JSON output deterministic.
