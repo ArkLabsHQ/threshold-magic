@@ -1,4 +1,4 @@
-package thresholdchilldkg
+package thresholdsdk
 
 import (
 	"context"
@@ -24,8 +24,8 @@ func TestSessionRecoveryData(t *testing.T) {
 		f.hub.Endpoint(addrOf(id))
 	}
 
-	coord := &Coordinator{Params: f.params, Transport: coordEp}
-	parts := make([]*Participant, 0, len(f.ids))
+	coord := &dkgCoordinator{Params: f.params, Transport: coordEp}
+	parts := make([]*dkgParticipant, 0, len(f.ids))
 	for _, id := range f.ids {
 		parts = append(parts, f.participant(id, f.hub.Endpoint(addrOf(id))))
 	}
@@ -36,16 +36,16 @@ func TestSessionRecoveryData(t *testing.T) {
 	}
 	coordCh := make(chan coordRes, 1)
 	go func() { rd, err := coord.Run(ctx); coordCh <- coordRes{rd, err} }()
-	ch := make(chan partResult, len(parts))
+	ch := make(chan blamePartResult, len(parts))
 	for _, p := range parts {
 		p := p
 		go func() {
 			out, rec, err := p.Run(ctx)
-			ch <- partResult{p.Self, out, rec, err}
+			ch <- blamePartResult{p.Self, out, rec, err}
 		}()
 	}
 
-	results := make(map[thres.Identifier]partResult, len(parts))
+	results := make(map[thres.Identifier]blamePartResult, len(parts))
 	for range parts {
 		r := <-ch
 		results[r.id] = r

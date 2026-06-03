@@ -1,4 +1,4 @@
-package thresholdchilldkg
+package thresholdsdk
 
 import (
 	"context"
@@ -8,9 +8,9 @@ import (
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 )
 
-// Coordinator runs the untrusted aggregator side of the ChillDKG protocol. It
+// dkgCoordinator runs the untrusted aggregator side of the ChillDKG protocol. It
 // relays and aggregates messages but never learns any secret.
-type Coordinator struct {
+type dkgCoordinator struct {
 	Params    thres.SessionParams
 	Transport Transport
 }
@@ -18,7 +18,7 @@ type Coordinator struct {
 // collectFromAll invokes handle once for each of the N participants, counting
 // distinct authenticated senders (non-participants ignored, first message wins)
 // so a flooding participant cannot displace another's slot.
-func (c *Coordinator) collectFromAll(ctx context.Context, handle func(id thres.Identifier, m Message) error, types ...string) error {
+func (c *dkgCoordinator) collectFromAll(ctx context.Context, handle func(id thres.Identifier, m Message) error, types ...string) error {
 	inbox := c.Transport.Inbox()
 	seen := make(map[thres.Identifier]bool, c.Params.N)
 	for len(seen) < int(c.Params.N) {
@@ -48,7 +48,7 @@ func (c *Coordinator) collectFromAll(ctx context.Context, handle func(id thres.I
 // broadcast the encrypted shares, then collect the certificate (or abort on an
 // investigation request). On success it returns the canonical RecoveryData blob —
 // identical to every participant's — so the coordinator can serve it later.
-func (c *Coordinator) Run(ctx context.Context) (thres.RecoveryData, error) {
+func (c *dkgCoordinator) Run(ctx context.Context) (thres.RecoveryData, error) {
 	n := int(c.Params.N)
 
 	// Phase 1: collect round-1 contributions, then broadcast them to everyone.

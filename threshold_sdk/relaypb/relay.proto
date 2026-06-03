@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package relay.v1;
 
-option go_package = "thresholdchilldkggrpc/relaypb;relaypb";
+option go_package = "thresholdsdk/relaypb;relaypb";
 
 // Relay is the star-topology message relay for a ChillDKG ceremony: participants
 // Send to the coordinator (unary) and Subscribe for messages addressed to them
@@ -14,7 +14,7 @@ service Relay {
   rpc Subscribe(SubscribeRequest) returns (stream Envelope);
 }
 
-// Envelope is the wire form of thresholdchilldkg.Message (1:1 fields).
+// Envelope is the wire form of thresholdsdk.Message (1:1 fields).
 message Envelope {
   string type = 1;
   string from = 2;

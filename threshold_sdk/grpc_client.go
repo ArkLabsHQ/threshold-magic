@@ -1,4 +1,4 @@
-package chillgrpc
+package thresholdsdk
 
 import (
 	"context"
@@ -7,22 +7,20 @@ import (
 	thres "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	chill "thresholdchilldkg"
-	"thresholdchilldkggrpc/relaypb"
+	"thresholdsdk/relaypb"
 )
 
 // Client is the participant-side transport: it Sends to the coordinator and
-// receives its messages over a Subscribe server stream. It satisfies
-// thresholdchilldkg.Transport.
+// receives its messages over a Subscribe server stream. It satisfies Transport.
 type Client struct {
 	self   string
 	conn   *grpc.ClientConn
 	client relaypb.RelayClient
-	inbox  chan chill.Message
+	inbox  chan Message
 	cancel context.CancelFunc
 }
 
-var _ chill.Transport = (*Client)(nil)
+var _ Transport = (*Client)(nil)
 
 // NewClient dials the coordinator at target over an insecure connection. self is
 // this participant's identifier (its address is hex(self.Serialize())).
@@ -35,7 +33,7 @@ func NewClient(target string, self thres.Identifier) (*Client, error) {
 		self:   addr(self),
 		conn:   conn,
 		client: relaypb.NewRelayClient(conn),
-		inbox:  make(chan chill.Message, chanBuf),
+		inbox:  make(chan Message, chanBuf),
 	}, nil
 }
 
@@ -69,10 +67,10 @@ func (c *Client) Start(ctx context.Context) error {
 }
 
 // Inbox returns the channel of messages addressed to this participant.
-func (c *Client) Inbox() <-chan chill.Message { return c.inbox }
+func (c *Client) Inbox() <-chan Message { return c.inbox }
 
 // SendTo delivers msg to the coordinator (the only address a participant uses).
-func (c *Client) SendTo(ctx context.Context, to string, msg chill.Message) error {
+func (c *Client) SendTo(ctx context.Context, to string, msg Message) error {
 	msg.From = c.self
 	msg.To = to
 	_, err := c.client.Send(ctx, toEnvelope(msg))
@@ -80,8 +78,8 @@ func (c *Client) SendTo(ctx context.Context, to string, msg chill.Message) error
 }
 
 // Broadcast is never used by a participant (only the coordinator broadcasts).
-func (c *Client) Broadcast(ctx context.Context, msg chill.Message) error {
-	return errors.New("chillgrpc: participant transport does not broadcast")
+func (c *Client) Broadcast(ctx context.Context, msg Message) error {
+	return errors.New("thresholdsdk: participant transport does not broadcast")
 }
 
 // Close stops the subscribe stream and closes the connection.

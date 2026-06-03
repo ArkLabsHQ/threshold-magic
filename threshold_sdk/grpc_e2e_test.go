@@ -1,4 +1,4 @@
-package chillgrpc
+package thresholdsdk
 
 import (
 	"context"
@@ -16,12 +16,11 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
-	chill "thresholdchilldkg"
-	"thresholdchilldkggrpc/relaypb"
+	"thresholdsdk/relaypb"
 )
 
-// fixture builds a session from the exported parent API only.
-type fixture struct {
+// grpcFixture builds a session from the exported parent API only.
+type grpcFixture struct {
 	params  thres.SessionParams
 	ids     []thres.Identifier
 	hostSks map[thres.Identifier]*secp.PrivateKey
@@ -29,9 +28,9 @@ type fixture struct {
 	coeffs  map[thres.Identifier][]secp.ModNScalar
 }
 
-func newFixture(t *testing.T, min, max uint16) fixture {
+func newGRPCFixture(t *testing.T, min, max uint16) grpcFixture {
 	t.Helper()
-	f := fixture{
+	f := grpcFixture{
 		hostSks: make(map[thres.Identifier]*secp.PrivateKey, max),
 		secrets: make(map[thres.Identifier]thres.SecretKey, max),
 		coeffs:  make(map[thres.Identifier][]secp.ModNScalar, max),
@@ -58,8 +57,8 @@ func newFixture(t *testing.T, min, max uint16) fixture {
 	return f
 }
 
-func (f fixture) participant(id thres.Identifier, tr chill.Transport) *chill.Participant {
-	return &chill.Participant{
+func (f grpcFixture) participant(id thres.Identifier, tr Transport) *dkgParticipant {
+	return &dkgParticipant{
 		Params: f.params, Self: id, HostSk: f.hostSks[id],
 		Secret: f.secrets[id], Coeffs: f.coeffs[id], Rng: rand.Reader, Transport: tr,
 	}
@@ -81,7 +80,7 @@ func TestGRPCEndToEnd(t *testing.T) {
 	for _, tc := range []struct{ min, max uint16 }{{2, 3}, {3, 5}} {
 		tc := tc
 		t.Run(fmt.Sprintf("%dof%d", tc.min, tc.max), func(t *testing.T) {
-			f := newFixture(t, tc.min, tc.max)
+			f := newGRPCFixture(t, tc.min, tc.max)
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 
@@ -106,7 +105,7 @@ func TestGRPCEndToEnd(t *testing.T) {
 
 			coordCh := make(chan coordOut, 1)
 			go func() {
-				rd, err := (&chill.Coordinator{Params: f.params, Transport: srv}).Run(ctx)
+				rd, err := (&dkgCoordinator{Params: f.params, Transport: srv}).Run(ctx)
 				coordCh <- coordOut{rd, err}
 			}()
 
@@ -158,7 +157,7 @@ func TestGRPCEndToEnd(t *testing.T) {
 // coordinator has broadcast cmsg1, proving the server's pre-created per-addr
 // buffers hold the broadcast for a not-yet-subscribed participant.
 func TestGRPCLateSubscriber(t *testing.T) {
-	f := newFixture(t, 2, 3)
+	f := newGRPCFixture(t, 2, 3)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -186,7 +185,7 @@ func TestGRPCLateSubscriber(t *testing.T) {
 
 	coordCh := make(chan coordOut, 1)
 	go func() {
-		rd, err := (&chill.Coordinator{Params: f.params, Transport: srv}).Run(ctx)
+		rd, err := (&dkgCoordinator{Params: f.params, Transport: srv}).Run(ctx)
 		coordCh <- coordOut{rd, err}
 	}()
 
@@ -215,7 +214,7 @@ func TestGRPCLateSubscriber(t *testing.T) {
 // TestGRPCStalledCeremonyTimesOut: with a participant missing, the coordinator
 // cannot collect N round-1 messages and the ceremony times out cleanly.
 func TestGRPCStalledCeremonyTimesOut(t *testing.T) {
-	f := newFixture(t, 2, 3)
+	f := newGRPCFixture(t, 2, 3)
 	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 	defer cancel()
 
@@ -241,7 +240,7 @@ func TestGRPCStalledCeremonyTimesOut(t *testing.T) {
 
 	coordCh := make(chan coordOut, 1)
 	go func() {
-		rd, err := (&chill.Coordinator{Params: f.params, Transport: srv}).Run(ctx)
+		rd, err := (&dkgCoordinator{Params: f.params, Transport: srv}).Run(ctx)
 		coordCh <- coordOut{rd, err}
 	}()
 	ch := make(chan partOut, len(present))
@@ -262,7 +261,7 @@ func TestGRPCStalledCeremonyTimesOut(t *testing.T) {
 
 // TestGRPCGuards exercises the server's admission guards directly.
 func TestGRPCGuards(t *testing.T) {
-	f := newFixture(t, 2, 3)
+	f := newGRPCFixture(t, 2, 3)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	srv := NewServer(f.params, lis)

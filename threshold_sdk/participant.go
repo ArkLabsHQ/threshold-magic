@@ -9,8 +9,6 @@ import (
 
 	core "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
-	chill "thresholdchilldkg"
-	chillgrpc "thresholdchilldkggrpc"
 )
 
 // ErrSelfNotInParams is returned when the host key's public key matches no
@@ -98,7 +96,7 @@ func (p *Participant) Run(ctx context.Context) (core.KeyPackage, error) {
 		return core.KeyPackage{}, err
 	}
 
-	client, err := chillgrpc.NewClient(p.coordAddr, p.self)
+	client, err := NewClient(p.coordAddr, p.self)
 	if err != nil {
 		return core.KeyPackage{}, err
 	}
@@ -107,7 +105,7 @@ func (p *Participant) Run(ctx context.Context) (core.KeyPackage, error) {
 		return core.KeyPackage{}, err
 	}
 
-	driver := &chill.Participant{
+	driver := &dkgParticipant{
 		Params:    p.params,
 		Self:      p.self,
 		HostSk:    p.hostSk,

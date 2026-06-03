@@ -1,7 +1,8 @@
-// Package chillgrpc is an insecure gRPC transport for the thresholdchilldkg SDK.
-// The coordinator runs Server (a gRPC relay); each participant runs Client. It
-// implements thresholdchilldkg.Transport with the same semantics as MemHub.
-package chillgrpc
+package thresholdsdk
+
+// Insecure gRPC transport: the coordinator runs Server (a gRPC relay); each
+// participant runs Client. Both implement Transport, with the same semantics as
+// MemHub.
 
 import (
 	"context"
@@ -13,8 +14,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	chill "thresholdchilldkg"
-	"thresholdchilldkggrpc/relaypb"
+	"thresholdsdk/relaypb"
 )
 
 //go:generate protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative relaypb/relay.proto
@@ -26,28 +26,28 @@ const chanBuf = 256
 // addrOf (hex of the serialized scalar).
 func addr(id thres.Identifier) string { return hex.EncodeToString(id.Serialize()) }
 
-func toEnvelope(m chill.Message) *relaypb.Envelope {
+func toEnvelope(m Message) *relaypb.Envelope {
 	return &relaypb.Envelope{Type: m.Type, From: m.From, To: m.To, Payload: m.Payload}
 }
 
-func fromEnvelope(e *relaypb.Envelope) chill.Message {
-	return chill.Message{Type: e.Type, From: e.From, To: e.To, Payload: e.Payload}
+func fromEnvelope(e *relaypb.Envelope) Message {
+	return Message{Type: e.Type, From: e.From, To: e.To, Payload: e.Payload}
 }
 
 // Server is the coordinator-side transport: a gRPC relay that also satisfies
-// thresholdchilldkg.Transport. Participants Send to it (routed to the coordinator
+// Transport. Participants Send to it (routed to the coordinator
 // inbox) and Subscribe to receive the messages addressed to them.
 type Server struct {
 	relaypb.UnimplementedRelayServer
 
-	inbox chan chill.Message            // messages addressed to the coordinator
-	subs  map[string]chan chill.Message // per-participant queues; immutable after New
+	inbox chan Message            // messages addressed to the coordinator
+	subs  map[string]chan Message // per-participant queues; immutable after New
 
 	grpc *grpc.Server
 	lis  net.Listener
 }
 
-var _ chill.Transport = (*Server)(nil)
+var _ Transport = (*Server)(nil)
 
 // NewServer pre-creates the coordinator inbox and one buffered queue per
 // participant (from params.IDs()), then registers the gRPC service on lis.
@@ -55,13 +55,13 @@ var _ chill.Transport = (*Server)(nil)
 // that has not Subscribed yet, exactly like MemHub.Endpoint.
 func NewServer(params thres.SessionParams, lis net.Listener) *Server {
 	s := &Server{
-		inbox: make(chan chill.Message, chanBuf),
-		subs:  make(map[string]chan chill.Message, params.N),
+		inbox: make(chan Message, chanBuf),
+		subs:  make(map[string]chan Message, params.N),
 		grpc:  grpc.NewServer(),
 		lis:   lis,
 	}
 	for _, id := range params.IDs() {
-		s.subs[addr(id)] = make(chan chill.Message, chanBuf)
+		s.subs[addr(id)] = make(chan Message, chanBuf)
 	}
 	relaypb.RegisterRelayServer(s.grpc, s)
 	return s
@@ -94,7 +94,7 @@ func (s *Server) Send(ctx context.Context, env *relaypb.Envelope) (*relaypb.Ack,
 		return nil, status.Error(codes.InvalidArgument, "empty to")
 	}
 	msg := fromEnvelope(env)
-	if env.To == chill.CoordinatorAddr {
+	if env.To == CoordinatorAddr {
 		select {
 		case s.inbox <- msg:
 		case <-ctx.Done():
@@ -133,15 +133,15 @@ func (s *Server) Subscribe(req *relaypb.SubscribeRequest, stream relaypb.Relay_S
 	}
 }
 
-// --- thresholdchilldkg.Transport (coordinator side) ---
+// --- Transport (coordinator side) ---
 
 // Inbox returns the channel of messages addressed to the coordinator.
-func (s *Server) Inbox() <-chan chill.Message { return s.inbox }
+func (s *Server) Inbox() <-chan Message { return s.inbox }
 
 // Broadcast queues msg for every participant (the coordinator is not a queue, so
 // it is naturally excluded), setting From to the coordinator.
-func (s *Server) Broadcast(ctx context.Context, msg chill.Message) error {
-	msg.From = chill.CoordinatorAddr
+func (s *Server) Broadcast(ctx context.Context, msg Message) error {
+	msg.From = CoordinatorAddr
 	for _, ch := range s.subs {
 		select {
 		case ch <- msg:
@@ -153,8 +153,8 @@ func (s *Server) Broadcast(ctx context.Context, msg chill.Message) error {
 }
 
 // SendTo queues msg for a single participant (unknown recipient dropped).
-func (s *Server) SendTo(ctx context.Context, to string, msg chill.Message) error {
-	msg.From = chill.CoordinatorAddr
+func (s *Server) SendTo(ctx context.Context, to string, msg Message) error {
+	msg.From = CoordinatorAddr
 	msg.To = to
 	ch, ok := s.subs[to]
 	if !ok {

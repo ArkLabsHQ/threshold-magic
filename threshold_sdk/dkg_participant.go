@@ -1,4 +1,4 @@
-package thresholdchilldkg
+package thresholdsdk
 
 import (
 	"context"
@@ -9,8 +9,8 @@ import (
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
-// Participant runs the key-holder side of the ChillDKG protocol over a Transport.
-type Participant struct {
+// dkgParticipant runs the key-holder side of the ChillDKG protocol over a Transport.
+type dkgParticipant struct {
 	Params    thres.SessionParams
 	Self      thres.Identifier
 	HostSk    *secp.PrivateKey
@@ -22,7 +22,7 @@ type Participant struct {
 	CoordAddr string
 }
 
-func (p *Participant) coord() string {
+func (p *dkgParticipant) coord() string {
 	if p.CoordAddr == "" {
 		return CoordinatorAddr
 	}
@@ -31,7 +31,7 @@ func (p *Participant) coord() string {
 
 // Run executes round 1, round 2, and finalize, returning the participant's
 // DKG output and the recovery data (transcript + success certificate).
-func (p *Participant) Run(ctx context.Context) (thres.DKGOutput, thres.RecoveryData, error) {
+func (p *dkgParticipant) Run(ctx context.Context) (thres.DKGOutput, thres.RecoveryData, error) {
 	// Round 1: VSS commitment + PoK + ephemeral key.
 	r1secret, r1pub, eph, err := thres.ParticipantStep1(p.Params, p.Self, p.Secret, p.Coeffs, p.Rng)
 	if err != nil {

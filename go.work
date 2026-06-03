@@ -1,8 +1,6 @@
 go 1.25.0
 
 use (
-	./threshold_chilldkg
-	./threshold_chilldkg/grpc
 	./threshold_core
 	./threshold_frost
 	./threshold_nostrdkg

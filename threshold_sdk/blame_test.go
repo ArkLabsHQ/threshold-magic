@@ -1,4 +1,4 @@
-package thresholdchilldkg
+package thresholdsdk
 
 import (
 	"context"
@@ -117,8 +117,8 @@ func newSessionFixture(t *testing.T, min, max uint16) sessionFixture {
 	return f
 }
 
-func (f sessionFixture) participant(id thres.Identifier, tr Transport) *Participant {
-	return &Participant{
+func (f sessionFixture) participant(id thres.Identifier, tr Transport) *dkgParticipant {
+	return &dkgParticipant{
 		Params:    f.params,
 		Self:      id,
 		HostSk:    f.hostSks[id],
@@ -129,7 +129,7 @@ func (f sessionFixture) participant(id thres.Identifier, tr Transport) *Particip
 	}
 }
 
-type partResult struct {
+type blamePartResult struct {
 	id  thres.Identifier
 	out thres.DKGOutput
 	rec thres.RecoveryData
@@ -153,8 +153,8 @@ func TestSessionBlamesCoordinatorOnShareTamper(t *testing.T) {
 		f.hub.Endpoint(addrOf(id))
 	}
 
-	coord := &Coordinator{Params: f.params, Transport: coordEp}
-	parts := make([]*Participant, 0, len(f.ids))
+	coord := &dkgCoordinator{Params: f.params, Transport: coordEp}
+	parts := make([]*dkgParticipant, 0, len(f.ids))
 	for _, id := range f.ids {
 		base := f.hub.Endpoint(addrOf(id))
 		var tr Transport = base
@@ -166,16 +166,16 @@ func TestSessionBlamesCoordinatorOnShareTamper(t *testing.T) {
 
 	coordErr := make(chan error, 1)
 	go func() { _, cerr := coord.Run(ctx); coordErr <- cerr }()
-	ch := make(chan partResult, len(parts))
+	ch := make(chan blamePartResult, len(parts))
 	for _, p := range parts {
 		p := p
 		go func() {
 			out, rec, err := p.Run(ctx)
-			ch <- partResult{p.Self, out, rec, err}
+			ch <- blamePartResult{p.Self, out, rec, err}
 		}()
 	}
 
-	results := make(map[thres.Identifier]partResult, len(parts))
+	results := make(map[thres.Identifier]blamePartResult, len(parts))
 	for range parts {
 		r := <-ch
 		results[r.id] = r
@@ -210,13 +210,13 @@ func TestSessionCoordinatorWithholdsInvData(t *testing.T) {
 		f.hub.Endpoint(addrOf(id))
 	}
 
-	// Coordinator drops the investigation data it should send the victim.
+	// dkgCoordinator drops the investigation data it should send the victim.
 	coordTr := &fnTransport{inner: coordBase, onSendTo: func(to string, msg Message) (Message, bool) {
 		return msg, msg.Type != msgInvData
 	}}
-	coord := &Coordinator{Params: f.params, Transport: coordTr}
+	coord := &dkgCoordinator{Params: f.params, Transport: coordTr}
 
-	parts := make([]*Participant, 0, len(f.ids))
+	parts := make([]*dkgParticipant, 0, len(f.ids))
 	for _, id := range f.ids {
 		base := f.hub.Endpoint(addrOf(id))
 		var tr Transport = base
@@ -228,21 +228,21 @@ func TestSessionCoordinatorWithholdsInvData(t *testing.T) {
 
 	coordErr := make(chan error, 1)
 	go func() { _, cerr := coord.Run(ctx); coordErr <- cerr }()
-	ch := make(chan partResult, len(parts))
+	ch := make(chan blamePartResult, len(parts))
 	for _, p := range parts {
 		p := p
 		go func() {
 			out, rec, err := p.Run(ctx)
-			ch <- partResult{p.Self, out, rec, err}
+			ch <- blamePartResult{p.Self, out, rec, err}
 		}()
 	}
 
-	// Coordinator returns after broadcasting abort; the victim is then stuck
+	// dkgCoordinator returns after broadcasting abort; the victim is then stuck
 	// waiting for investigation data that was dropped, so cancel to release it.
 	assert.ErrorIs(t, <-coordErr, ErrCeremonyAborted)
 	cancel()
 
-	results := make(map[thres.Identifier]partResult, len(parts))
+	results := make(map[thres.Identifier]blamePartResult, len(parts))
 	for range parts {
 		r := <-ch
 		results[r.id] = r
@@ -271,8 +271,8 @@ func TestCoordinatorDedupsDuplicatePhase3(t *testing.T) {
 		f.hub.Endpoint(addrOf(id))
 	}
 
-	coord := &Coordinator{Params: f.params, Transport: coordEp}
-	parts := make([]*Participant, 0, len(f.ids))
+	coord := &dkgCoordinator{Params: f.params, Transport: coordEp}
+	parts := make([]*dkgParticipant, 0, len(f.ids))
 	for _, id := range f.ids {
 		base := f.hub.Endpoint(addrOf(id))
 		var tr Transport = base
@@ -285,16 +285,16 @@ func TestCoordinatorDedupsDuplicatePhase3(t *testing.T) {
 
 	coordErr := make(chan error, 1)
 	go func() { _, cerr := coord.Run(ctx); coordErr <- cerr }()
-	ch := make(chan partResult, len(parts))
+	ch := make(chan blamePartResult, len(parts))
 	for _, p := range parts {
 		p := p
 		go func() {
 			out, rec, err := p.Run(ctx)
-			ch <- partResult{p.Self, out, rec, err}
+			ch <- blamePartResult{p.Self, out, rec, err}
 		}()
 	}
 
-	results := make(map[thres.Identifier]partResult, len(parts))
+	results := make(map[thres.Identifier]blamePartResult, len(parts))
 	for range parts {
 		r := <-ch
 		results[r.id] = r

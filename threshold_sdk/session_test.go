@@ -1,4 +1,4 @@
-package thresholdchilldkg
+package thresholdsdk
 
 import (
 	"context"
@@ -47,7 +47,7 @@ func TestSessionEndToEndOverMemTransport(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Coordinator endpoint must exist before participants broadcast.
+	// dkgCoordinator endpoint must exist before participants broadcast.
 	coordEndpoint := hub.Endpoint(CoordinatorAddr)
 	for _, id := range ids {
 		hub.Endpoint(addrOf(id))
@@ -65,14 +65,14 @@ func TestSessionEndToEndOverMemTransport(t *testing.T) {
 
 	coordErr := make(chan error, 1)
 	go func() {
-		coord := &Coordinator{Params: params, Transport: coordEndpoint}
+		coord := &dkgCoordinator{Params: params, Transport: coordEndpoint}
 		_, cerr := coord.Run(ctx)
 		coordErr <- cerr
 	}()
 
 	for _, id := range ids {
 		id := id
-		p := &Participant{
+		p := &dkgParticipant{
 			Params:    params,
 			Self:      id,
 			HostSk:    hostSks[id],

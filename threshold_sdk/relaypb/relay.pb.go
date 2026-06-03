@@ -21,7 +21,7 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Envelope is the wire form of thresholdchilldkg.Message (1:1 fields).
+// Envelope is the wire form of thresholdsdk.Message (1:1 fields).
 type Envelope struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Type          string                 `protobuf:"bytes,1,opt,name=type,proto3" json:"type,omitempty"`
@@ -185,7 +185,7 @@ const file_relaypb_relay_proto_rawDesc = "" +
 	"\x04addr\x18\x01 \x01(\tR\x04addr2q\n" +
 	"\x05Relay\x12)\n" +
 	"\x04Send\x12\x12.relay.v1.Envelope\x1a\r.relay.v1.Ack\x12=\n" +
-	"\tSubscribe\x12\x1a.relay.v1.SubscribeRequest\x1a\x12.relay.v1.Envelope0\x01B'Z%thresholdchilldkggrpc/relaypb;relaypbb\x06proto3"
+	"\tSubscribe\x12\x1a.relay.v1.SubscribeRequest\x1a\x12.relay.v1.Envelope0\x01B\x1eZ\x1cthresholdsdk/relaypb;relaypbb\x06proto3"
 
 var (
 	file_relaypb_relay_proto_rawDescOnce sync.Once

@@ -6,8 +6,6 @@ import (
 	"net"
 
 	core "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
-	chill "thresholdchilldkg"
-	chillgrpc "thresholdchilldkggrpc"
 )
 
 // Coordinator runs the untrusted gRPC relay side of a ChillDKG ceremony and
@@ -17,7 +15,7 @@ type Coordinator struct {
 	params core.SessionParams
 	store  Store
 	lis    net.Listener
-	srv    *chillgrpc.Server
+	srv    *Server
 }
 
 // NewCoordinator binds a gRPC listener on listenAddr and prepares the relay. Use
@@ -38,7 +36,7 @@ func NewCoordinator(params core.SessionParams, listenAddr string, store Store) (
 		params: params,
 		store:  store,
 		lis:    lis,
-		srv:    chillgrpc.NewServer(params, lis),
+		srv:    NewServer(params, lis),
 	}, nil
 }
 
@@ -50,7 +48,7 @@ func (c *Coordinator) Addr() net.Addr { return c.lis.Addr() }
 // runs a fresh ceremony (a new key); it is not idempotent.
 func (c *Coordinator) Run(ctx context.Context) (core.RecoveryData, error) {
 	c.srv.Start()
-	rd, err := (&chill.Coordinator{Params: c.params, Transport: c.srv}).Run(ctx)
+	rd, err := (&dkgCoordinator{Params: c.params, Transport: c.srv}).Run(ctx)
 	if err != nil {
 		return core.RecoveryData{}, err
 	}

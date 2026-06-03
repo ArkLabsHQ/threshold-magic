@@ -1,8 +1,8 @@
-// Package thresholdchilldkg is the transport-agnostic SDK for ChillDKG
-// (encrypted PedPop + CertEq), built on thresholdcore's pure step functions. It
-// adds a Transport abstraction and the Participant/Coordinator roles that run a
-// full ceremony over any message channel, plus an in-memory transport (MemHub).
-package thresholdchilldkg
+// Package thresholdsdk is the embeddable ChillDKG SDK: it runs a full ceremony
+// (encrypted PedPop + CertEq, built on thresholdcore) over a pluggable Transport —
+// in-memory (MemHub) or gRPC — behind the Coordinator/Participant types, and
+// persists the public RecoveryData via a Store.
+package thresholdsdk
 
 import (
 	"context"
