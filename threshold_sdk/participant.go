@@ -30,11 +30,12 @@ type Participant struct {
 // out-of-range length and the zero key. It is a convenience for callers holding
 // the secret as a string; the SDK itself takes a *secp.PrivateKey.
 func HostKeyFromHex(s string) (*secp.PrivateKey, error) {
+	const hostSecretLen = 32
 	b, err := hex.DecodeString(s)
 	if err != nil {
 		return nil, err
 	}
-	if len(b) != 32 {
+	if len(b) != hostSecretLen {
 		return nil, errors.New("thresholdsdk: host secret must be 32 bytes")
 	}
 	sk := secp.PrivKeyFromBytes(b)

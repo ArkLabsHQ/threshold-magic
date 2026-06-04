@@ -67,7 +67,7 @@ func (h *MemHub) Endpoint(addr string) *MemTransport {
 	defer h.mu.Unlock()
 	ch, ok := h.inboxes[addr]
 	if !ok {
-		ch = make(chan Message, 256)
+		ch = make(chan Message, chanBuf)
 		h.inboxes[addr] = ch
 	}
 	return &MemTransport{hub: h, addr: addr, inbox: ch}

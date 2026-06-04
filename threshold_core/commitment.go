@@ -27,7 +27,7 @@ func (vss VerifiableSecretSharingCommitment) MarshalJSON() ([]byte, error) {
 // SerializeCompressed returns the BIP VSSCommitment wire form (com.to_bytes()):
 // the concatenation of every coefficient commitment in 33-byte compressed form.
 func (vss VerifiableSecretSharingCommitment) SerializeCompressed() ([]byte, error) {
-	out := make([]byte, 0, 33*len(vss.Coeffs))
+	out := make([]byte, 0, compressedPointLen*len(vss.Coeffs))
 	for _, c := range vss.Coeffs {
 		b, err := elemSerializeCompressed(c)
 		if err != nil {

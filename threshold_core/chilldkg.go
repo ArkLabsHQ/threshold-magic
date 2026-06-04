@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 
@@ -23,6 +24,50 @@ var ErrInvalidSessionParams = errors.New("invalid session params")
 // ErrDuplicateHostKey is returned when two participants share a host public key
 // (host keys must be distinct so an identifier is recoverable from its host key).
 var ErrDuplicateHostKey = errors.New("duplicate host public key")
+
+// ErrInvalidHostKey is returned when a host public key is not a valid point.
+var ErrInvalidHostKey = errors.New("invalid host public key")
+
+// ErrInvalidRecoveryData is returned when a recovery blob fails to deserialize or
+// validate (BIP RecoveryDataError).
+var ErrInvalidRecoveryData = errors.New("invalid recovery data")
+
+// ErrInvalidRandomness is returned when the supplied randomness is not 32 bytes.
+var ErrInvalidRandomness = errors.New("randomness must be 32 bytes")
+
+// secp256k1 serialization sizes, in bytes.
+const (
+	compressedPointLen = 33 // compressed secp256k1 point
+	scalarLen          = 32 // 32-byte scalar (secret share, identifier, enc_secshare)
+	schnorrSigLen      = 64 // BIP340 signature (proof-of-possession, certificate)
+	u32Len             = 4  // 4-byte big-endian field (threshold, participant index)
+	// recoveryStride is the per-participant span of a recovery blob:
+	// hostpubkey + pubnonce + enc_secshare + certificate signature.
+	recoveryStride = 2*compressedPointLen + scalarLen + schnorrSigLen // 162
+)
+
+// BIP FROST DKG tagged-hash labels: the suffix after the "BIP DKG/" domain prefix
+// (bipTag) that bipHash prepends. Fixed by the spec.
+const (
+	labelParamsID          = "params_id"
+	labelVSSCoeffs         = "vss coeffs"
+	labelEncpedpopSeed     = "encpedpop seed"
+	labelSimplpedpopAux    = "simplpedpop aux"
+	labelEncpedpopSecnonce = "encpedpop secnonce"
+	labelPopMessage        = "pop message"    // signed under bipTag+labelPopMessage
+	labelCerteqMessage     = "certeq message" // signed under bipTag+labelCerteqMessage
+)
+
+// tagBIP340 is the standard BIP340 Schnorr tag root (aux/nonce/challenge), used for
+// CertEq signatures — distinct from the "BIP DKG/" domain prefix (bipTag).
+const tagBIP340 = "BIP0340"
+
+// tagTapTweak is the BIP341 Taproot tweak tag (the reference's invalid_taproot_commit).
+const tagTapTweak = "TapTweak"
+
+// compressedEvenY is the SEC1 compressed-point prefix for an even-Y coordinate; a
+// BIP340 x-only key or nonce is lifted to the even-Y point.
+const compressedEvenY byte = 0x02
 
 // SessionParams are the parameters all participants must agree on for a session.
 // Per ChillDKG there is no random nonce: SessionID is the deterministic params_id
@@ -80,7 +125,7 @@ func NewSessionParams(t uint16, hostPubs map[Identifier]*secp.PublicKey) (Sessio
 func ParamsID(t uint16, hostPubs map[Identifier]*secp.PublicKey) ([32]byte, error) {
 	n := uint16(len(hostPubs))
 	ids := SessionParams{HostPubs: hostPubs}.IDs()
-	buf := make([]byte, 0, 4+len(ids)*(32+33))
+	buf := make([]byte, 0, 4+len(ids)*(scalarLen+compressedPointLen))
 	buf = append(buf, byte(t>>8), byte(t), byte(n>>8), byte(n))
 	for _, id := range ids {
 		buf = append(buf, id.Serialize()...)
@@ -327,17 +372,42 @@ func (p SessionParams) orderedHostPubs() [][]byte {
 	return pubs
 }
 
+// validateBIPParams mirrors chilldkg.params_validate: 1 <= t <= n, every hostpubkey
+// is a valid compressed point, and there are no duplicates.
+func validateBIPParams(t uint32, hostpubkeys [][]byte) error {
+	n := len(hostpubkeys)
+	if t < 1 || int(t) > n {
+		return ErrInvalidSessionParams
+	}
+	seen := make(map[string]int, n)
+	for i, hp := range hostpubkeys {
+		if _, err := secp.ParsePubKey(hp); err != nil {
+			return fmt.Errorf("host pubkey %d: %w", i, ErrInvalidHostKey)
+		}
+		if j, dup := seen[string(hp)]; dup {
+			return fmt.Errorf("host pubkeys %d and %d: %w", j, i, ErrDuplicateHostKey)
+		}
+		seen[string(hp)] = i
+	}
+	return nil
+}
+
 // BIPParamsID is the BIP params_id: tagged_hash("BIP DKG/params_id", t(4B BE) ‖
-// ∥hostpubkeys). Positional (no identifiers); accepts any t in 1..n.
-func BIPParamsID(t uint32, hostpubkeys [][]byte) [32]byte {
+// ∥hostpubkeys). Positional (no identifiers); accepts any t in 1..n. It rejects
+// invalid parameters (params_validate) before hashing.
+func BIPParamsID(t uint32, hostpubkeys [][]byte) ([32]byte, error) {
+	if err := validateBIPParams(t, hostpubkeys); err != nil {
+		return [32]byte{}, err
+	}
 	parts := make([][]byte, 0, 1+len(hostpubkeys))
 	parts = append(parts, be32(t))
 	parts = append(parts, hostpubkeys...)
-	return bipHash("params_id", parts...)
+	return bipHash(labelParamsID, parts...), nil
 }
 
-// BIPHostpubkeyGen is chilldkg.hostpubkey_gen: the 33-byte compressed key for hostseckey.
-func BIPHostpubkeyGen(hostseckey []byte) ([]byte, error) {
+// parseBIPHostSeckey validates a host secret key against chilldkg's HostSeckeyError
+// precondition — exactly 32 bytes and a scalar in 1..n-1 — and returns it as a key.
+func parseBIPHostSeckey(hostseckey []byte) (*secp.PrivateKey, error) {
 	if len(hostseckey) != 32 {
 		return nil, ErrSeckeyLen
 	}
@@ -345,14 +415,23 @@ func BIPHostpubkeyGen(hostseckey []byte) ([]byte, error) {
 	if d.SetByteSlice(hostseckey) || d.IsZero() {
 		return nil, ErrSeckeyRange
 	}
-	return elemSerializeCompressed(elemBaseMul(&d))
+	return secp.NewPrivateKey(&d), nil
+}
+
+// BIPHostpubkeyGen is chilldkg.hostpubkey_gen: the 33-byte compressed key for hostseckey.
+func BIPHostpubkeyGen(hostseckey []byte) ([]byte, error) {
+	hostSk, err := parseBIPHostSeckey(hostseckey)
+	if err != nil {
+		return nil, err
+	}
+	return hostSk.PubKey().SerializeCompressed(), nil
 }
 
 // bipVSSGenerate is VSS.generate: coeffs[i] = tagged_hash("vss coeffs", seed ‖ i).
 func bipVSSGenerate(seed []byte, t uint32) []secp.ModNScalar {
 	coeffs := make([]secp.ModNScalar, t)
 	for i := uint32(0); i < t; i++ {
-		ch := bipHash("vss coeffs", seed, be32(i))
+		ch := bipHash(labelVSSCoeffs, seed, be32(i))
 		coeffs[i] = modNFromBytesAllowZero(ch[:])
 	}
 	return coeffs
@@ -375,11 +454,14 @@ func bipVSSSecshares(coeffs []secp.ModNScalar, n int) ([]secp.ModNScalar, error)
 
 // BIPParticipantStep1 is chilldkg.participant_step1: the deterministic EncPedPop
 // round-1 message com(33·t) ‖ pop(64) ‖ pubnonce(33) ‖ enc_shares(32·n).
-func (p SessionParams) BIPParticipantStep1(hostSk *secp.PrivateKey, random []byte) ([]byte, error) {
-	if len(random) != 32 {
-		return nil, ErrInvalidSessionParams
+func (p SessionParams) BIPParticipantStep1(hostseckey, random []byte) ([]byte, error) {
+	hostSk, err := parseBIPHostSeckey(hostseckey)
+	if err != nil {
+		return nil, err
 	}
-	hostseckey := hostSk.Serialize()
+	if len(random) != 32 {
+		return nil, ErrInvalidRandomness
+	}
 	hostpubkeys := p.orderedHostPubs()
 	t := uint32(p.T)
 	n := len(hostpubkeys)
@@ -398,9 +480,9 @@ func (p SessionParams) BIPParticipantStep1(hostSk *secp.PrivateKey, random []byt
 
 	// Deterministic key generation (encpedpop.participant_step1).
 	encCtx := encContextBytes(t, hostpubkeys)
-	simplSeed := bipHash("encpedpop seed", hostseckey, random, encCtx)
-	simplAux := bipHash("simplpedpop aux", simplSeed[:])
-	secnonceH := bipHash("encpedpop secnonce", simplSeed[:])
+	simplSeed := bipHash(labelEncpedpopSeed, hostseckey, random, encCtx)
+	simplAux := bipHash(labelSimplpedpopAux, simplSeed[:])
+	secnonceH := bipHash(labelEncpedpopSecnonce, simplSeed[:])
 	secnonceScalar := modNFromBytesAllowZero(secnonceH[:])
 	secnoncePriv := secp.NewPrivateKey(&secnonceScalar)
 	pubnoncePub := secnoncePriv.PubKey()
@@ -423,7 +505,7 @@ func (p SessionParams) BIPParticipantStep1(hostSk *secp.PrivateKey, random []byt
 
 	// Proof-of-possession over idx, signed with the VSS secret a0.
 	a0 := coeffs[0].Bytes()
-	pop, err := bipSchnorrSign(be32(uint32(idx)), a0[:], simplAux[:], bipTag+"pop message")
+	pop, err := bipSchnorrSign(be32(uint32(idx)), a0[:], simplAux[:], bipTag+labelPopMessage)
 	if err != nil {
 		return nil, err
 	}
@@ -435,7 +517,7 @@ func (p SessionParams) BIPParticipantStep1(hostSk *secp.PrivateKey, random []byt
 	}
 
 	// pmsg1 = simpl_pmsg ‖ pubnonce ‖ enc_shares, simpl_pmsg = com ‖ pop.
-	pmsg := make([]byte, 0, len(com)+64+33+32*n)
+	pmsg := make([]byte, 0, len(com)+schnorrSigLen+compressedPointLen+scalarLen*n)
 	pmsg = append(pmsg, com...)
 	pmsg = append(pmsg, pop...)
 	pmsg = append(pmsg, pubnonce...)
@@ -446,31 +528,41 @@ func (p SessionParams) BIPParticipantStep1(hostSk *secp.PrivateKey, random []byt
 	return pmsg, nil
 }
 
-// parseBIPPmsg1 splits a round-1 message: com(33·t) ‖ pop(64) ‖ pubnonce(33) ‖ enc_shares(32·n).
-func parseBIPPmsg1(b []byte, t, n int) (com VerifiableSecretSharingCommitment, pop, pubnonce []byte, encShares []secp.ModNScalar, err error) {
-	if len(b) != 33*t+64+33+32*n {
+// parseBIPmsg1 splits a round-1 message: com(33·t) ‖ pop(64) ‖ pubnonce(33) ‖ enc_shares(32·n).
+func parseBIPmsg1(b []byte, t, n int) (com VerifiableSecretSharingCommitment, pop, pubnonce []byte, encShares []secp.ModNScalar, err error) {
+	if len(b) != compressedPointLen*t+schnorrSigLen+compressedPointLen+scalarLen*n {
 		return VerifiableSecretSharingCommitment{}, nil, nil, nil, ErrIncorrectPackage
 	}
 	off := 0
 	coeffs := make([]CoefficientCommitment, t)
 	for i := 0; i < t; i++ {
-		pt, derr := elemDeserializeCompressed(b[off : off+33])
+		pt, derr := elemDeserializeCompressed(b[off : off+compressedPointLen])
 		if derr != nil {
 			return VerifiableSecretSharingCommitment{}, nil, nil, nil, derr
 		}
 		coeffs[i] = pt
-		off += 33
+		off += compressedPointLen
 	}
-	pop = b[off : off+64]
-	off += 64
-	pubnonce = b[off : off+33]
-	off += 33
+	pop = b[off : off+schnorrSigLen]
+	off += schnorrSigLen
+	pubnonce = b[off : off+compressedPointLen]
+	off += compressedPointLen
 	encShares = make([]secp.ModNScalar, n)
 	for r := 0; r < n; r++ {
-		encShares[r] = modNFromBytesAllowZero(b[off : off+32])
-		off += 32
+		encShares[r] = modNFromBytesAllowZero(b[off : off+scalarLen])
+		off += scalarLen
 	}
 	return VerifiableSecretSharingCommitment{Coeffs: coeffs}, pop, pubnonce, encShares, nil
+}
+
+// cmsg1Len is the byte length of a coordinator round-1 message (cmsg1) for
+// threshold t and n participants, summed by wire section.
+func cmsg1Len(t, n int) int {
+	commitments := compressedPointLen * (n + t - 1) // coms_to_secrets(n) + sum_coms_nonconst(t-1)
+	pops := schnorrSigLen * n                       // one proof of possession per participant
+	pubnonces := compressedPointLen * n             // one encryption pubnonce per participant
+	encSecshares := scalarLen * n                   // one encrypted secret share per participant
+	return commitments + pops + pubnonces + encSecshares
 }
 
 // BIPCoordinatorStep1 is chilldkg.coordinator_step1: it aggregates the round-1
@@ -488,9 +580,9 @@ func (p SessionParams) BIPCoordinatorStep1(pmsgs [][]byte) ([]byte, error) {
 	commits := make([]*VerifiableSecretSharingCommitment, n)
 	encShares := make([][]secp.ModNScalar, n)
 	for i, pm := range pmsgs {
-		com, pop, pubnonce, enc, err := parseBIPPmsg1(pm, t, n)
+		com, pop, pubnonce, enc, err := parseBIPmsg1(pm, t, n)
 		if err != nil {
-			return nil, err
+			return nil, &BIPFaultyParticipantError{Participant: i, Reason: "invalid participant message"}
 		}
 		c := com
 		commits[i] = &c
@@ -518,7 +610,7 @@ func (p SessionParams) BIPCoordinatorStep1(pmsgs [][]byte) ([]byte, error) {
 		encSecshares[r] = sum
 	}
 
-	out := make([]byte, 0, 33*n+33*(t-1)+64*n+33*n+32*n)
+	out := make([]byte, 0, cmsg1Len(t, n))
 	for i := 0; i < n; i++ {
 		out = append(out, comsToSecrets[i]...)
 	}
@@ -544,61 +636,77 @@ func (p SessionParams) BIPCoordinatorStep1(pmsgs [][]byte) ([]byte, error) {
 
 // parseBIPCmsg1 splits cmsg1 and assembles sum_coms (Coeffs[0]=Σ coms_to_secrets,
 // Coeffs[1:]=summed non-constant terms).
-func parseBIPCmsg1(b []byte, t, n int) (sumComs VerifiableSecretSharingCommitment, pops, pubnonces [][]byte, encSecshares []secp.ModNScalar, err error) {
-	if len(b) != 33*n+33*(t-1)+64*n+33*n+32*n {
-		return VerifiableSecretSharingCommitment{}, nil, nil, nil, ErrIncorrectPackage
+func parseBIPCmsg1(b []byte, t, n int) (comsToSecrets []CoefficientCommitment, sumComs VerifiableSecretSharingCommitment, pops, pubnonces [][]byte, encSecshares []secp.ModNScalar, err error) {
+	// cmsg1 is produced by the coordinator, so any malformed field is its fault
+	// (a degenerate per-participant value is caught later by the caller).
+	if len(b) != cmsg1Len(t, n) {
+		err = &BIPFaultyCoordinatorError{Reason: "invalid cmsg1"}
+		return
 	}
 	off := 0
-	pt := func() (secp.JacobianPoint, error) {
-		p, e := elemDeserializeCompressed(b[off : off+33])
-		off += 33
-		return p, e
-	}
 
-	sumSecret, err := pt() // coms_to_secrets[0]
-	if err != nil {
-		return VerifiableSecretSharingCommitment{}, nil, nil, nil, err
-	}
-	for i := 1; i < n; i++ {
-		c, e := pt()
-		if e != nil {
-			return VerifiableSecretSharingCommitment{}, nil, nil, nil, e
+	// coms_to_secrets: infinity is a valid encoding (a degenerate commitment),
+	// checked per-participant by the caller; only a bad encoding fails here.
+	comsToSecrets = make([]CoefficientCommitment, n)
+	for i := 0; i < n; i++ {
+		if comsToSecrets[i], err = decodePointWithInfinity(b[off : off+compressedPointLen]); err != nil {
+			err = &BIPFaultyCoordinatorError{Reason: "invalid cmsg1"}
+			return
 		}
-		sumSecret = elemAdd(sumSecret, c)
+		off += compressedPointLen
+	}
+	sumSecret := comsToSecrets[0]
+	for i := 1; i < n; i++ {
+		sumSecret = elemAdd(sumSecret, comsToSecrets[i])
 	}
 	coeffs := make([]CoefficientCommitment, t)
 	coeffs[0] = sumSecret
 	for j := 1; j < t; j++ {
-		c, e := pt()
-		if e != nil {
-			return VerifiableSecretSharingCommitment{}, nil, nil, nil, e
+		if coeffs[j], err = decodePointWithInfinity(b[off : off+compressedPointLen]); err != nil {
+			err = &BIPFaultyCoordinatorError{Reason: "invalid cmsg1"}
+			return
 		}
-		coeffs[j] = c
+		off += compressedPointLen
 	}
 
 	pops = make([][]byte, n)
 	for i := 0; i < n; i++ {
-		pops[i] = b[off : off+64]
-		off += 64
+		pops[i] = b[off : off+schnorrSigLen]
+		off += schnorrSigLen
 	}
 	pubnonces = make([][]byte, n)
 	for i := 0; i < n; i++ {
-		pubnonces[i] = b[off : off+33]
-		off += 33
+		pn := b[off : off+compressedPointLen]
+		if _, perr := secp.ParsePubKey(pn); perr != nil {
+			err = &BIPFaultyCoordinatorError{Reason: "invalid cmsg1"}
+			return
+		}
+		pubnonces[i] = pn
+		off += compressedPointLen
 	}
 	encSecshares = make([]secp.ModNScalar, n)
 	for i := 0; i < n; i++ {
-		encSecshares[i] = modNFromBytesAllowZero(b[off : off+32])
-		off += 32
+		encSecshares[i] = modNFromBytesAllowZero(b[off : off+scalarLen])
+		off += scalarLen
 	}
-	return VerifiableSecretSharingCommitment{Coeffs: coeffs}, pops, pubnonces, encSecshares, nil
+	sumComs = VerifiableSecretSharingCommitment{Coeffs: coeffs}
+	return
+}
+
+// decodePointWithInfinity decodes a 33-byte compressed point, accepting the
+// all-zero encoding as the point at infinity (to_bytes_compressed_with_infinity).
+func decodePointWithInfinity(b []byte) (secp.JacobianPoint, error) {
+	if len(b) == compressedPointLen && bytes.Equal(b, make([]byte, compressedPointLen)) {
+		return secp.JacobianPoint{}, nil // infinity (Z == 0)
+	}
+	return elemDeserializeCompressed(b)
 }
 
 // certeqMessage is the message signed in CertEq: a 33-byte zero-padded domain
 // prefix ‖ idx(4B) ‖ x (BIP DKG certeq_message).
 func certeqMessage(x []byte, idx uint32) []byte {
 	prefix := make([]byte, 33)
-	copy(prefix, bipTag+"certeq message")
+	copy(prefix, bipTag+labelCerteqMessage)
 	out := make([]byte, 0, 33+4+len(x))
 	out = append(out, prefix...)
 	out = append(out, be32(idx)...)
@@ -628,9 +736,15 @@ func bipEqInput(t int, sumComs VerifiableSecretSharingCommitment, enckeys, pubno
 	return out, nil
 }
 
-// BIPParticipantStep2 is chilldkg.participant_step2: from cmsg1 it builds eq_input
-// and returns pmsg2, the participant's CertEq signature over it.
-func (p SessionParams) BIPParticipantStep2(hostSk *secp.PrivateKey, cmsg1, auxRand []byte) ([]byte, error) {
+// BIPParticipantStep2 is chilldkg.participant_step2: from cmsg1 it verifies the
+// other participants and the caller's own share, then returns pmsg2 (the caller's
+// CertEq signature over eq_input). random is the same value used in step1 (needed
+// to re-derive the caller's own commitment for the echo check).
+func (p SessionParams) BIPParticipantStep2(hostseckey, random, cmsg1, auxRand []byte) ([]byte, error) {
+	hostSk, err := parseBIPHostSeckey(hostseckey)
+	if err != nil {
+		return nil, err
+	}
 	t, n := int(p.T), int(p.N)
 	enckeys := p.orderedHostPubs()
 
@@ -645,16 +759,68 @@ func (p SessionParams) BIPParticipantStep2(hostSk *secp.PrivateKey, cmsg1, auxRa
 	if idx < 0 {
 		return nil, ErrNotInParams
 	}
+	if len(random) != 32 {
+		return nil, ErrInvalidRandomness
+	}
 
-	sumComs, _, pubnonces, encSecshares, err := parseBIPCmsg1(cmsg1, t, n)
+	comsToSecrets, sumComs, pops, pubnonces, encSecshares, err := parseBIPCmsg1(cmsg1, t, n)
 	if err != nil {
 		return nil, err
 	}
+
+	// The coordinator must echo the caller's own commitment-to-secret unchanged.
+	encCtx := encContextBytes(uint32(t), enckeys)
+	simplSeed := bipHash(labelEncpedpopSeed, hostSk.Serialize(), random, encCtx)
+	myComToSecret := elemBaseMul(&bipVSSGenerate(simplSeed[:], uint32(t))[0])
+	if !pointEqual(comsToSecrets[idx], myComToSecret) {
+		return nil, &BIPFaultyCoordinatorError{Reason: "coordinator echoed the wrong commitment-to-secret"}
+	}
+
+	// Verify every other participant's commitment-to-secret and proof-of-possession.
+	for i := 0; i < n; i++ {
+		if i == idx {
+			continue
+		}
+		if isInfinity(comsToSecrets[i]) {
+			return nil, &BIPFaultyParticipantOrCoordinatorError{Participant: i, Reason: "Participant sent invalid commitment"}
+		}
+		px, perr := xonly(comsToSecrets[i])
+		if perr != nil {
+			return nil, &BIPFaultyParticipantOrCoordinatorError{Participant: i, Reason: "Participant sent invalid commitment"}
+		}
+		if !bipSchnorrVerify(be32(uint32(i)), px, pops[i], bipTag+labelPopMessage) {
+			return nil, &BIPFaultyParticipantOrCoordinatorError{Participant: i, Reason: "Participant sent invalid proof-of-knowledge"}
+		}
+	}
+
+	// Decrypt + tweak the caller's share and check it against the group commitment;
+	// a mismatch means some sender or the coordinator is faulty (run investigation).
+	secshare, err := p.bipDepads(hostSk, encSecshares[idx], pubnonces, idx)
+	if err != nil {
+		return nil, err
+	}
+	tweak, sumComsTweaked, err := bipTapTweak(sumComs)
+	if err != nil {
+		return nil, err
+	}
+	secshare.Add(&tweak)
+	var x secp.ModNScalar
+	x.SetInt(uint32(idx + 1))
+	id, err := NewIdentifier(x)
+	if err != nil {
+		return nil, err
+	}
+	if !pointEqual(elemBaseMul(&secshare), sumComsTweaked.GetVerifyingShare(id)) {
+		// Invalid share — run BIPParticipantInvestigate with the coordinator's
+		// investigation message to pin the faulty party.
+		return nil, ErrInvalidSecretShare
+	}
+
 	eqInput, err := bipEqInput(t, sumComs, enckeys, pubnonces, encSecshares)
 	if err != nil {
 		return nil, err
 	}
-	return bipSchnorrSign(certeqMessage(eqInput, uint32(idx)), hostSk.Serialize(), auxRand, "BIP0340")
+	return bipSchnorrSign(certeqMessage(eqInput, uint32(idx)), hostSk.Serialize(), auxRand, tagBIP340)
 }
 
 // BIPDKGOutput is the BIP ChillDKG result (post taproot tweak): the threshold
@@ -668,18 +834,18 @@ type BIPDKGOutput struct {
 // bipSchnorrVerify is secp256k1lab.bip340.schnorr_verify with a custom tag prefix
 // (the verification counterpart of bipSchnorrSign).
 func bipSchnorrVerify(msg, pubXonly, sig []byte, tagPrefix string) bool {
-	if len(pubXonly) != 32 || len(sig) != 64 {
+	if len(pubXonly) != scalarLen || len(sig) != schnorrSigLen {
 		return false
 	}
-	P, err := secp.ParsePubKey(append([]byte{0x02}, pubXonly...))
+	P, err := secp.ParsePubKey(append([]byte{compressedEvenY}, pubXonly...))
 	if err != nil {
 		return false
 	}
 	var s secp.ModNScalar
-	if s.SetByteSlice(sig[32:64]) { // s >= n
+	if s.SetByteSlice(sig[scalarLen:schnorrSigLen]) { // s >= n
 		return false
 	}
-	eh := taggedHash(tagPrefix+"/challenge", sig[0:32], pubXonly, msg)
+	eh := taggedHash(tagPrefix+subtagChallenge, sig[0:scalarLen], pubXonly, msg)
 	e := modNFromBytesAllowZero(eh[:])
 	eNeg := e
 	eNeg.Negate()
@@ -691,7 +857,7 @@ func bipSchnorrVerify(msg, pubXonly, sig []byte, tagPrefix string) bool {
 	}
 	r.ToAffine()
 	comp := secp.NewPublicKey(&r.X, &r.Y).SerializeCompressed()
-	return comp[0] == 0x02 && bytes.Equal(comp[1:], sig[0:32]) // even y and R.x == r
+	return comp[0] == compressedEvenY && bytes.Equal(comp[1:], sig[0:scalarLen]) // even y and R.x == r
 }
 
 // bipCerteqVerify checks the N-of-N CertEq certificate over eqInput (each host key
@@ -699,13 +865,13 @@ func bipSchnorrVerify(msg, pubXonly, sig []byte, tagPrefix string) bool {
 func (p SessionParams) bipCerteqVerify(eqInput, cert []byte) error {
 	hostpubkeys := p.orderedHostPubs()
 	n := len(hostpubkeys)
-	if len(cert) != 64*n {
+	if len(cert) != schnorrSigLen*n {
 		return ErrInvalidCertSignature
 	}
 	for i := 0; i < n; i++ {
 		msg := certeqMessage(eqInput, uint32(i))
-		if !bipSchnorrVerify(msg, hostpubkeys[i][1:33], cert[i*64:(i+1)*64], "BIP0340") {
-			return ErrInvalidCertSignature
+		if !bipSchnorrVerify(msg, hostpubkeys[i][1:compressedPointLen], cert[i*schnorrSigLen:(i+1)*schnorrSigLen], tagBIP340) {
+			return &BIPFaultyParticipantOrCoordinatorError{Participant: i, Reason: "invalid signature in certificate"}
 		}
 	}
 	return nil
@@ -719,7 +885,7 @@ func bipTapTweak(sumComs VerifiableSecretSharingCommitment) (secp.ModNScalar, Ve
 	if err != nil {
 		return secp.ModNScalar{}, VerifiableSecretSharingCommitment{}, err
 	}
-	th := taggedHash("TapTweak", pk)
+	th := taggedHash(tagTapTweak, pk)
 	tweak := modNFromBytesAllowZero(th[:])
 	pubtweak := elemBaseMul(&tweak)
 	coeffs := make([]CoefficientCommitment, len(sumComs.Coeffs))
@@ -749,9 +915,9 @@ func (p SessionParams) bipPads(hostSk *secp.PrivateKey, pubnonces [][]byte, idx 
 	return pads, nil
 }
 
-// bipDecaps decrypts the caller's aggregated secret share from encSecshare:
+// bipDepads decrypts the caller's aggregated secret share from encSecshare:
 // encSecshare − Σ pads.
-func (p SessionParams) bipDecaps(hostSk *secp.PrivateKey, encSecshare secp.ModNScalar, pubnonces [][]byte, idx int) (secp.ModNScalar, error) {
+func (p SessionParams) bipDepads(hostSk *secp.PrivateKey, encSecshare secp.ModNScalar, pubnonces [][]byte, idx int) (secp.ModNScalar, error) {
 	pads, err := p.bipPads(hostSk, pubnonces, idx)
 	if err != nil {
 		return secp.ModNScalar{}, err
@@ -798,7 +964,11 @@ func bipDKGOutput(sumComsTweaked VerifiableSecretSharingCommitment, n int, secsh
 
 // BIPParticipantFinalize is chilldkg.participant_finalize: verify the cert (cmsg2),
 // decrypt + tweak the caller's share, return the DKGOutput + recovery data (eq_input ‖ cert).
-func (p SessionParams) BIPParticipantFinalize(hostSk *secp.PrivateKey, cmsg1, cmsg2 []byte) (BIPDKGOutput, []byte, error) {
+func (p SessionParams) BIPParticipantFinalize(hostseckey, cmsg1, cmsg2 []byte) (BIPDKGOutput, []byte, error) {
+	hostSk, err := parseBIPHostSeckey(hostseckey)
+	if err != nil {
+		return BIPDKGOutput{}, nil, err
+	}
 	t, n := int(p.T), int(p.N)
 	enckeys := p.orderedHostPubs()
 
@@ -814,7 +984,7 @@ func (p SessionParams) BIPParticipantFinalize(hostSk *secp.PrivateKey, cmsg1, cm
 		return BIPDKGOutput{}, nil, ErrNotInParams
 	}
 
-	sumComs, _, pubnonces, encSecshares, err := parseBIPCmsg1(cmsg1, t, n)
+	_, sumComs, _, pubnonces, encSecshares, err := parseBIPCmsg1(cmsg1, t, n)
 	if err != nil {
 		return BIPDKGOutput{}, nil, err
 	}
@@ -822,11 +992,16 @@ func (p SessionParams) BIPParticipantFinalize(hostSk *secp.PrivateKey, cmsg1, cm
 	if err != nil {
 		return BIPDKGOutput{}, nil, err
 	}
+	// A wrong-length cmsg2 is the coordinator's malformed message; a bad signature
+	// inside it implicates that participant (bipCerteqVerify).
+	if len(cmsg2) != schnorrSigLen*n {
+		return BIPDKGOutput{}, nil, &BIPFaultyCoordinatorError{Reason: "invalid certificate length"}
+	}
 	if err := p.bipCerteqVerify(eqInput, cmsg2); err != nil {
 		return BIPDKGOutput{}, nil, err
 	}
 
-	secshare, err := p.bipDecaps(hostSk, encSecshares[idx], pubnonces, idx)
+	secshare, err := p.bipDepads(hostSk, encSecshares[idx], pubnonces, idx)
 	if err != nil {
 		return BIPDKGOutput{}, nil, err
 	}
@@ -852,7 +1027,7 @@ func (p SessionParams) BIPCoordinatorFinalize(cmsg1 []byte, pmsg2s [][]byte) (BI
 	t, n := int(p.T), int(p.N)
 	enckeys := p.orderedHostPubs()
 
-	sumComs, _, pubnonces, encSecshares, err := parseBIPCmsg1(cmsg1, t, n)
+	_, sumComs, _, pubnonces, encSecshares, err := parseBIPCmsg1(cmsg1, t, n)
 	if err != nil {
 		return BIPDKGOutput{}, nil, err
 	}
@@ -861,11 +1036,23 @@ func (p SessionParams) BIPCoordinatorFinalize(cmsg1 []byte, pmsg2s [][]byte) (BI
 		return BIPDKGOutput{}, nil, err
 	}
 
-	cert := make([]byte, 0, 64*len(pmsg2s))
-	for _, s := range pmsg2s {
+	if len(pmsg2s) != n {
+		return BIPDKGOutput{}, nil, ErrIncorrectNumberOfPackages
+	}
+	cert := make([]byte, 0, schnorrSigLen*n)
+	for i, s := range pmsg2s {
+		if len(s) != schnorrSigLen {
+			return BIPDKGOutput{}, nil, &BIPFaultyParticipantError{Participant: i, Reason: "invalid pmsg2 length"}
+		}
 		cert = append(cert, s...)
 	}
 	if err := p.bipCerteqVerify(eqInput, cert); err != nil {
+		// Coordinator-side: a bad signature is proof the participant is faulty
+		// (downgrade the ambiguous participant-or-coordinator verdict).
+		var fe *BIPFaultyParticipantOrCoordinatorError
+		if errors.As(err, &fe) {
+			return BIPDKGOutput{}, nil, &BIPFaultyParticipantError{Participant: fe.Participant, Reason: fe.Reason}
+		}
 		return BIPDKGOutput{}, nil, err
 	}
 
@@ -907,58 +1094,81 @@ func bipSessionFromHostpubkeys(hostpubkeys [][]byte, t uint32) (SessionParams, e
 // BIPRecover is chilldkg.recover: from a recovery_data blob (eq_input ‖ cert) and a
 // host secret key (nil = coordinator), re-derive the params, verify the cert, and
 // recover the DKGOutput. Returns the output and the recovered (hostpubkeys, t).
-func BIPRecover(hostSk *secp.PrivateKey, recoveryData []byte) (BIPDKGOutput, [][]byte, uint32, error) {
-	if len(recoveryData) < 4 {
-		return BIPDKGOutput{}, nil, 0, ErrIncorrectPackage
+func BIPRecover(hostseckey, recoveryData []byte) (out BIPDKGOutput, hostpubkeys [][]byte, threshold uint32, err error) {
+	// An empty hostseckey recovers the coordinator output (no secshare); a non-empty
+	// one must be a valid host secret key (chilldkg's HostSeckeyError precondition).
+	var hostSk *secp.PrivateKey
+	if len(hostseckey) != 0 {
+		if hostSk, err = parseBIPHostSeckey(hostseckey); err != nil {
+			return
+		}
 	}
-	t := int(binary.BigEndian.Uint32(recoveryData[:4]))
-	// len = 4 + 33·t (sum_coms) + 162·n (hostpubkeys+pubnonces+enc_secshares+cert).
-	rem := len(recoveryData) - 4 - 33*t
-	if t < 1 || rem < 0 || rem%162 != 0 {
-		return BIPDKGOutput{}, nil, 0, ErrIncorrectPackage
+	const deser = "failed to deserialize recovery data"
+	if len(recoveryData) < u32Len {
+		err = fmt.Errorf("%s: %w", deser, ErrInvalidRecoveryData)
+		return
 	}
-	n := rem / 162
+	t := int(binary.BigEndian.Uint32(recoveryData[:u32Len]))
+	// len = u32Len + compressedPointLen·t (sum_coms) + recoveryStride·n
+	// (hostpubkey + pubnonce + enc_secshare + certificate, per participant).
+	rem := len(recoveryData) - u32Len - compressedPointLen*t
+	if t < 1 || rem < 0 || rem%recoveryStride != 0 {
+		err = fmt.Errorf("%s: %w", deser, ErrInvalidRecoveryData)
+		return
+	}
+	n := rem / recoveryStride
 
-	off := 4
+	off := u32Len
 	coeffs := make([]CoefficientCommitment, t)
 	for i := 0; i < t; i++ {
-		pt, err := elemDeserializeCompressed(recoveryData[off : off+33])
-		if err != nil {
-			return BIPDKGOutput{}, nil, 0, err
+		if coeffs[i], err = elemDeserializeCompressed(recoveryData[off : off+compressedPointLen]); err != nil {
+			err = fmt.Errorf("%s: %w", deser, ErrInvalidRecoveryData)
+			return
 		}
-		coeffs[i] = pt
-		off += 33
+		off += compressedPointLen
 	}
 	sumComs := VerifiableSecretSharingCommitment{Coeffs: coeffs}
-	hostpubkeys := make([][]byte, n)
+	hostpubkeys = make([][]byte, n)
 	for i := 0; i < n; i++ {
-		hostpubkeys[i] = recoveryData[off : off+33]
-		off += 33
+		hostpubkeys[i] = recoveryData[off : off+compressedPointLen]
+		off += compressedPointLen
 	}
 	pubnonces := make([][]byte, n)
 	for i := 0; i < n; i++ {
-		pubnonces[i] = recoveryData[off : off+33]
-		off += 33
+		pubnonces[i] = recoveryData[off : off+compressedPointLen]
+		off += compressedPointLen
 	}
 	encSecshares := make([]secp.ModNScalar, n)
 	for i := 0; i < n; i++ {
-		encSecshares[i] = modNFromBytesAllowZero(recoveryData[off : off+32])
-		off += 32
+		var s secp.ModNScalar
+		if s.SetByteSlice(recoveryData[off : off+scalarLen]) { // reject scalar >= n
+			err = fmt.Errorf("%s: %w", deser, ErrInvalidRecoveryData)
+			return
+		}
+		encSecshares[i] = s
+		off += scalarLen
 	}
-	cert := recoveryData[off : off+64*n]
+	cert := recoveryData[off : off+schnorrSigLen*n]
 	eqInput := recoveryData[:off] // everything before the cert
 
-	params, err := bipSessionFromHostpubkeys(hostpubkeys, uint32(t))
-	if err != nil {
-		return BIPDKGOutput{}, nil, 0, err
+	if validateBIPParams(uint32(t), hostpubkeys) != nil {
+		err = fmt.Errorf("invalid session parameters in recovery data: %w", ErrInvalidRecoveryData)
+		return
 	}
-	if err := params.bipCerteqVerify(eqInput, cert); err != nil {
-		return BIPDKGOutput{}, nil, 0, err
+	params, perr := bipSessionFromHostpubkeys(hostpubkeys, uint32(t))
+	if perr != nil {
+		err = fmt.Errorf("invalid session parameters in recovery data: %w", ErrInvalidRecoveryData)
+		return
+	}
+	if params.bipCerteqVerify(eqInput, cert) != nil {
+		err = fmt.Errorf("invalid certificate in recovery data: %w", ErrInvalidRecoveryData)
+		return
 	}
 
-	tweak, sumComsTweaked, err := bipTapTweak(sumComs)
-	if err != nil {
-		return BIPDKGOutput{}, nil, 0, err
+	tweak, sumComsTweaked, terr := bipTapTweak(sumComs)
+	if terr != nil {
+		err = terr
+		return
 	}
 
 	// hostSk == nil recovers the coordinator (no secshare); otherwise the key must
@@ -974,31 +1184,47 @@ func BIPRecover(hostSk *secp.PrivateKey, recoveryData []byte) (BIPDKGOutput, [][
 			}
 		}
 		if idx < 0 {
-			return BIPDKGOutput{}, nil, 0, ErrNotInParams
+			err = ErrNotInParams
+			return
 		}
-		secshare, derr := params.bipDecaps(hostSk, encSecshares[idx], pubnonces, idx)
+		secshare, derr := params.bipDepads(hostSk, encSecshares[idx], pubnonces, idx)
 		if derr != nil {
-			return BIPDKGOutput{}, nil, 0, derr
+			err = derr
+			return
 		}
 		secshare.Add(&tweak)
 		secsharePtr = &secshare
 	}
 
-	out, err := bipDKGOutput(sumComsTweaked, n, secsharePtr)
-	if err != nil {
-		return BIPDKGOutput{}, nil, 0, err
+	if out, err = bipDKGOutput(sumComsTweaked, n, secsharePtr); err != nil {
+		return
 	}
-	return out, hostpubkeys, uint32(t), nil
+	threshold = uint32(t)
+	return
 }
 
-// BIPFaultyParticipantError blames a specific participant (by index) — the BIP's
-// FaultyParticipantOrCoordinatorError: provably the participant or the coordinator.
+// BIPFaultyParticipantError is the BIP's FaultyParticipantError: proof (detected by
+// the coordinator, which sees the raw participant messages) that participant
+// Participant is faulty. It can be definitively excluded.
 type BIPFaultyParticipantError struct {
 	Participant int
 	Reason      string
 }
 
 func (e *BIPFaultyParticipantError) Error() string { return "faulty participant: " + e.Reason }
+
+// BIPFaultyParticipantOrCoordinatorError is the BIP's
+// FaultyParticipantOrCoordinatorError: detected by a participant, it implicates
+// participant Participant — but the coordinator may have framed an honest one by
+// altering a relayed message, so blame is not proof (run the investigation).
+type BIPFaultyParticipantOrCoordinatorError struct {
+	Participant int
+	Reason      string
+}
+
+func (e *BIPFaultyParticipantOrCoordinatorError) Error() string {
+	return "faulty participant or coordinator: " + e.Reason
+}
 
 // BIPFaultyCoordinatorError blames the coordinator.
 type BIPFaultyCoordinatorError struct{ Reason string }
@@ -1018,7 +1244,7 @@ func (p SessionParams) BIPCoordinatorInvestigate(pmsgs [][]byte) ([][]byte, erro
 	coms := make([]VerifiableSecretSharingCommitment, n)
 	encShares := make([][]secp.ModNScalar, n)
 	for j, pm := range pmsgs {
-		com, _, _, enc, err := parseBIPPmsg1(pm, t, n)
+		com, _, _, enc, err := parseBIPmsg1(pm, t, n)
 		if err != nil {
 			return nil, err
 		}
@@ -1033,7 +1259,7 @@ func (p SessionParams) BIPCoordinatorInvestigate(pmsgs [][]byte) ([][]byte, erro
 		if err != nil {
 			return nil, err
 		}
-		out := make([]byte, 0, 32*n+33*n)
+		out := make([]byte, 0, scalarLen*n+compressedPointLen*n)
 		for j := 0; j < n; j++ { // enc_partial_secshares
 			b := encShares[j][i].Bytes()
 			out = append(out, b[:]...)
@@ -1053,23 +1279,23 @@ func (p SessionParams) BIPCoordinatorInvestigate(pmsgs [][]byte) ([][]byte, erro
 // parseBIPCinv splits a coordinator investigation message into the per-sender
 // encrypted partial shares (32·n) and partial pubshares (33·n).
 func parseBIPCinv(b []byte, n int) ([]secp.ModNScalar, []secp.JacobianPoint, error) {
-	if len(b) != 32*n+33*n {
+	if len(b) != scalarLen*n+compressedPointLen*n {
 		return nil, nil, ErrIncorrectPackage
 	}
 	off := 0
 	encPartial := make([]secp.ModNScalar, n)
 	for i := 0; i < n; i++ {
-		encPartial[i] = modNFromBytesAllowZero(b[off : off+32])
-		off += 32
+		encPartial[i] = modNFromBytesAllowZero(b[off : off+scalarLen])
+		off += scalarLen
 	}
 	partialPub := make([]secp.JacobianPoint, n)
 	for i := 0; i < n; i++ {
-		pt, err := elemDeserializeCompressed(b[off : off+33])
+		pt, err := elemDeserializeCompressed(b[off : off+compressedPointLen])
 		if err != nil {
 			return nil, nil, err
 		}
 		partialPub[i] = pt
-		off += 33
+		off += compressedPointLen
 	}
 	return encPartial, partialPub, nil
 }
@@ -1077,7 +1303,11 @@ func parseBIPCinv(b []byte, n int) ([]secp.ModNScalar, []secp.JacobianPoint, err
 // BIPParticipantInvestigate is participant_investigate: it attributes blame for the
 // caller's failed share, always returning a verdict (*BIPFaultyParticipantError or
 // *BIPFaultyCoordinatorError). A sender is pinned only when provably inconsistent.
-func (p SessionParams) BIPParticipantInvestigate(hostSk *secp.PrivateKey, cmsg1, cinv []byte) error {
+func (p SessionParams) BIPParticipantInvestigate(hostseckey, cmsg1, cinv []byte) error {
+	hostSk, err := parseBIPHostSeckey(hostseckey)
+	if err != nil {
+		return err
+	}
 	t, n := int(p.T), int(p.N)
 	enckeys := p.orderedHostPubs()
 
@@ -1093,7 +1323,7 @@ func (p SessionParams) BIPParticipantInvestigate(hostSk *secp.PrivateKey, cmsg1,
 		return ErrNotInParams
 	}
 
-	sumComs, _, pubnonces, encSecshares, err := parseBIPCmsg1(cmsg1, t, n)
+	_, sumComs, _, pubnonces, encSecshares, err := parseBIPCmsg1(cmsg1, t, n)
 	if err != nil {
 		return err
 	}
@@ -1159,7 +1389,7 @@ func (p SessionParams) BIPParticipantInvestigate(hostSk *secp.PrivateKey, cmsg1,
 	for j := 0; j < n; j++ {
 		if !pointEqual(elemBaseMul(&partialSec[j]), partialPub[j]) {
 			if j != idx {
-				return &BIPFaultyParticipantError{Participant: j, Reason: "Participant sent invalid partial secshare"}
+				return &BIPFaultyParticipantOrCoordinatorError{Participant: j, Reason: "Participant sent invalid partial secshare"}
 			}
 			return &BIPFaultyCoordinatorError{Reason: "Coordinator fiddled with the share from me to myself"}
 		}

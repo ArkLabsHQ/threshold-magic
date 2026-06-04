@@ -91,9 +91,9 @@ func (p SessionParams) encryptionContext() (encCtx []byte, idxOf map[Identifier]
 // prefixed (the sender prefixes each recipient's; the recipient prefixes its own),
 // so sender and recipient derive byte-identical context for the same pad.
 func padContext(recipientIndex uint32, encCtx []byte) []byte {
-	out := make([]byte, 4+len(encCtx))
-	binary.BigEndian.PutUint32(out[:4], recipientIndex)
-	copy(out[4:], encCtx)
+	out := make([]byte, u32Len+len(encCtx))
+	binary.BigEndian.PutUint32(out[:u32Len], recipientIndex)
+	copy(out[u32Len:], encCtx)
 	return out
 }
 
@@ -349,7 +349,7 @@ func bipHash(tag string, parts ...[]byte) [32]byte {
 
 // be32 encodes x as 4 big-endian bytes.
 func be32(x uint32) []byte {
-	b := make([]byte, 4)
+	b := make([]byte, u32Len)
 	binary.BigEndian.PutUint32(b, x)
 	return b
 }
@@ -373,6 +373,14 @@ func encContextBytes(t uint32, orderedHostPubs [][]byte) []byte {
 	return out
 }
 
+// BIP340 tagged-hash sub-tags, appended to a signature's tag prefix (e.g. tagBIP340
+// or bipTag+labelPopMessage) to form the aux/nonce/challenge hash domains.
+const (
+	subtagAux       = "/aux"
+	subtagNonce     = "/nonce"
+	subtagChallenge = "/challenge"
+)
+
 // bipSchnorrSign is a deterministic BIP340 signature over msg, where tagPrefix is
 // the full aux/nonce/challenge tag prefix ("BIP0340" for CertEq, "BIP DKG/pop
 // message" for the proof-of-possession).
@@ -394,14 +402,14 @@ func bipSchnorrSign(msg, seckey, auxRand []byte, tagPrefix string) ([]byte, erro
 
 	// t = bytes(d) XOR tagged_hash(tag/aux, aux_rand)
 	db := d.Bytes()
-	aux := taggedHash(tagPrefix+"/aux", auxRand)
+	aux := taggedHash(tagPrefix+subtagAux, auxRand)
 	var tt [32]byte
-	for i := 0; i < 32; i++ {
+	for i := 0; i < scalarLen; i++ {
 		tt[i] = db[i] ^ aux[i]
 	}
 
 	// k0 = int(tagged_hash(tag/nonce, t ‖ Px ‖ msg)) mod n
-	nh := taggedHash(tagPrefix+"/nonce", tt[:], px, msg)
+	nh := taggedHash(tagPrefix+subtagNonce, tt[:], px, msg)
 	k0 := modNFromBytesAllowZero(nh[:])
 	if k0.IsZero() {
 		return nil, ErrNonceZero
@@ -418,7 +426,7 @@ func bipSchnorrSign(msg, seckey, auxRand []byte, tagPrefix string) ([]byte, erro
 	}
 
 	// e = int(tagged_hash(tag/challenge, Rx ‖ Px ‖ msg)) mod n
-	eh := taggedHash(tagPrefix+"/challenge", rx, px, msg)
+	eh := taggedHash(tagPrefix+subtagChallenge, rx, px, msg)
 	e := modNFromBytesAllowZero(eh[:])
 
 	// s = (k + e·d) mod n
@@ -426,9 +434,9 @@ func bipSchnorrSign(msg, seckey, auxRand []byte, tagPrefix string) ([]byte, erro
 	s.Mul2(&e, &d).Add(&k)
 	sb := s.Bytes()
 
-	sig := make([]byte, 64)
-	copy(sig[:32], rx)
-	copy(sig[32:], sb[:])
+	sig := make([]byte, schnorrSigLen)
+	copy(sig[:scalarLen], rx)
+	copy(sig[scalarLen:], sb[:])
 	return sig, nil
 }
 

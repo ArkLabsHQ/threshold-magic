@@ -19,8 +19,12 @@ import (
 
 //go:generate protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative relaypb/relay.proto
 
-// chanBuf mirrors MemHub's per-endpoint buffer size.
+// chanBuf is the per-endpoint inbox buffer size, shared by the gRPC server/client
+// and the in-memory MemHub.
 const chanBuf = 256
+
+// gracefulStopTimeout bounds GracefulStop on Close before a hard Stop.
+const gracefulStopTimeout = 2 * time.Second
 
 // addr is the transport address of an identifier — identical to the parent's
 // addrOf (hex of the serialized scalar).
@@ -80,7 +84,7 @@ func (s *Server) Close() {
 	go func() { s.grpc.GracefulStop(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(gracefulStopTimeout):
 		s.grpc.Stop()
 	}
 }
