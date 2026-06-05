@@ -42,6 +42,7 @@ type Leader struct {
 	epoch     uint64                              // monotonic re-DKG epoch
 	groupKey  []byte                              // stable group key once known
 	groupSize int                                 // member count of the last successful re-DKG
+	groupT    int                                 // signing threshold of the last successful re-DKG
 }
 
 // membershipEvent is a pending committee change handled by the Serve loop.
@@ -108,6 +109,14 @@ func (l *Leader) GroupSize() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.groupSize
+}
+
+// Threshold is the signing threshold (MajorityPolicy of the member count) of the most
+// recent successful re-DKG; 0 before any.
+func (l *Leader) Threshold() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.groupT
 }
 
 // secret loads the leader's persisted a0, generating and persisting a fresh one on
@@ -233,6 +242,7 @@ func (l *Leader) rekey(ctx context.Context) error {
 			l.mu.Lock()
 			l.groupKey = out.ThresholdPubkey
 			l.groupSize = len(committee)
+			l.groupT = int(MajorityPolicy(len(committee)))
 			l.mu.Unlock()
 			return nil
 		}
