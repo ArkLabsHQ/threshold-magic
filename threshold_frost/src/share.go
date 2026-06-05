@@ -15,7 +15,6 @@ func (s *SignatureShare) verify(id thres.Identifier, verifyingShare thres.Verify
 	secp256k1.ScalarBaseMultNonConst(&s.s, &left)
 
 	// right = R_i + (λ_i * e) * Y_i
-	//verifyiongShareD := (*secp256k1.ModNScalar)(&verifyingShare)
 
 	lambdaE := lambda_i.Mul(&challenge)
 	temp := secp256k1.JacobianPoint{}

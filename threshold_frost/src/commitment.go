@@ -112,7 +112,6 @@ func ComputeGroupCommitment(
 		temp := secp256k1.JacobianPoint{}
 		secp256k1.AddNonConst(&groupCommitment, &hide, &temp)
 		groupCommitment = temp
-		//
 	}
 
 	// accumulated binding commitment via MSM

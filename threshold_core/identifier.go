@@ -38,7 +38,6 @@ func (id Identifier) ToScalar() secp.ModNScalar { return id.S }
 // Derive hashes arbitrary bytes into a scalar identifier (rejects zero).
 // If you need a domain-separated variant, prefix or tag the input before calling.
 func Derive(msg []byte) (Identifier, error) {
-	// Simple HID: hash → mod-N scalar
 	h := sha256.Sum256(msg)
 	s, err := modNFromBytesBE(h[:])
 	if err != nil {
@@ -113,8 +112,6 @@ func (id Identifier) Compare(other Identifier) int {
 	a := id.Serialize()
 	b := other.Serialize()
 
-	// If lengths differ (they won't here), left-pad the shorter with zeros.
-	// Since both are 32 bytes, just compare lexicographically.
 	for i := 0; i < len(a) && i < len(b); i++ {
 		if a[i] < b[i] {
 			return -1
@@ -123,7 +120,6 @@ func (id Identifier) Compare(other Identifier) int {
 			return 1
 		}
 	}
-	// If equal length and all bytes equal, they are equal.
 	if len(a) == len(b) {
 		return 0
 	}

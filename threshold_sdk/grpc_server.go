@@ -25,8 +25,7 @@ const chanBuf = 256
 // gracefulStopTimeout bounds GracefulStop on Close before a hard Stop.
 const gracefulStopTimeout = 2 * time.Second
 
-// addr is the transport address of an identifier — identical to the parent's
-// addrOf (hex of the serialized scalar).
+// addr is the hex transport address of an identifier (duplicate of addrOf).
 func addr(id thres.Identifier) string { return hex.EncodeToString(id.Serialize()) }
 
 func toEnvelope(m Message) *relaypb.Envelope {

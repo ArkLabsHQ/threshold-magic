@@ -71,30 +71,20 @@ func (s *SigningPackage) bindingFactorPreimages(
 	return out, nil
 }
 
-// / Performed once by each participant selected for the signing operation.
-// /
-// / Implements [`sign`] from the spec.
-// /
-// / Receives the message to be signed and a set of signing commitments and a set
-// / of randomizing commitments to be used in that signing operation, including
-// / that for this participant.
-// /
-// / Assumes the participant has already determined which nonce corresponds with
-// / the commitment that was assigned by the coordinator in the SigningPackage.
-// /
-// / [`sign`]: https://datatracker.ietf.org/doc/html/rfc9591#name-round-two-signature-share-g
+// Sign produces this participant's signature share (RFC 9591 round two). It assumes
+// the caller has matched its nonce to the commitment the coordinator assigned in the
+// SigningPackage.
+// https://datatracker.ietf.org/doc/html/rfc9591#name-round-two-signature-share-g
 func Sign(
 	signingPackage SigningPackage, signingNonce SigningNonce, keyPackage thres.KeyPackage) (*SignatureShare, error) {
 
 	if len(signingPackage.Commitments) < int(keyPackage.MinSigners) {
-		// Not enough participants to sign
 		return nil, thres.ErrIncorrectNumberOfCommitments
 	}
 
 	commitment := signingPackage.Commitments[keyPackage.Identifier]
 
 	if signingNonce.commitments != commitment {
-		// Nonce does not match commitment
 		return nil, ErrInvalidCommitment
 	}
 
@@ -144,7 +134,7 @@ func ComputeChallenge(R *secp256k1.JacobianPoint, vk thres.VerifyingKey, message
 // verifying each share if the final signature verification fails.
 func Aggregate(
 	signingPackage *SigningPackage,
-	signatureShares map[thres.Identifier]SignatureShare, // key = string(id.Serialize())
+	signatureShares map[thres.Identifier]SignatureShare,
 	pubkeys thres.PublicKeyPackage,
 ) (*thres.Signature, error) {
 	// 1) identifier set must match
@@ -170,10 +160,9 @@ func Aggregate(
 		return nil, err
 	}
 
-	// aggregate z = sum(z_i)
-	var z secp256k1.ModNScalar // zero by default
+	// aggregate z = Σ z_i (mod n)
+	var z secp256k1.ModNScalar
 	for _, sh := range signatureShares {
-		// z = z + z_i (mod n); ModNScalar.Add mutates receiver and returns it
 		z.Add(&sh.s)
 	}
 
@@ -240,7 +229,7 @@ func DetectCheater(
 		}
 	}
 
-	// If all passed, fall back to a generic error to mirror Rust's "should not reach"
+	// all shares verified individually: no single cheater identified
 	return ErrorInvalidSignature
 }
 

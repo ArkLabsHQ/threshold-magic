@@ -9,8 +9,7 @@ import (
 
 func modNFromBytesBE(b []byte) (secp.ModNScalar, error) {
 	var s secp.ModNScalar
-	// SetByteSlice reduces mod N and reports overflow (value >= N) via the bool.
-	// We accept overflow since reduction is the desired behavior.
+	// SetByteSlice reduces mod N; overflow (>= N) is intentionally accepted.
 	_ = s.SetByteSlice(b)
 	if s.IsZero() {
 		return s, ErrInvalidZeroScalar
@@ -20,7 +19,6 @@ func modNFromBytesBE(b []byte) (secp.ModNScalar, error) {
 
 func modNZero() secp.ModNScalar {
 	var z secp.ModNScalar
-	// zero value is 0
 	return z
 }
 
@@ -30,17 +28,10 @@ func modNOne() secp.ModNScalar {
 	return one
 }
 
-// Serialize compressed: Jacobian -> affine -> compressed pubkey
+// elemSerializeCompressed encodes a Jacobian point as a 33-byte compressed pubkey.
 func elemSerializeCompressed(e secp.JacobianPoint) ([]byte, error) {
-	var ax, ay secp.FieldVal
-	ax.Set(&e.X)
-	ay.Set(&e.Y)
-
-	// Convert to affine if needed
 	aff := e
 	aff.ToAffine()
-
-	// Build a PublicKey from affine X,Y (FieldVal → big.Int)
 	x := aff.X
 	y := aff.Y
 	pk := secp.NewPublicKey(&x, &y)
@@ -61,24 +52,19 @@ func elemDeserializeCompressed(b []byte) (secp.JacobianPoint, error) {
 	return j, nil
 }
 
-// Base * scalar
 func elemBaseMul(k *secp.ModNScalar) secp.JacobianPoint {
-	// Adjust name if your local API differs (e.g., ScalarBaseMultNonConst)
 	var r secp.JacobianPoint
 	secp.ScalarBaseMultNonConst(k, &r)
 	return r
 }
 
-// P + Q
 func elemAdd(a, b secp.JacobianPoint) secp.JacobianPoint {
 	var r secp.JacobianPoint
 	secp.AddNonConst(&a, &b, &r)
 	return r
 }
 
-// P * k
 func elemMul(a secp.JacobianPoint, k *secp.ModNScalar) secp.JacobianPoint {
-	// Adjust name if your local API differs (e.g., ScalarMultNonConst)
 	var r secp.JacobianPoint
 	secp.ScalarMultNonConst(k, &a, &r)
 	return r
@@ -106,7 +92,6 @@ func evaluatePolynomial(id Identifier, coeffs []secp.ModNScalar) secp.ModNScalar
 	}
 	x := id.ToScalar()
 	val := modNZero()
-	// value = ((...(c_{t-1} * x + c_{t-2}) * x + ... ) * x ) + c0
 	for i := len(coeffs) - 1; i >= 0; i-- {
 		if i != len(coeffs)-1 {
 			val.Mul(&x)

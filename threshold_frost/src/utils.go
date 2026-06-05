@@ -7,7 +7,7 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
-// VartimeMultiscalarMul is a simplified version — you’ll need to adapt for speed.
+// VartimeMultiscalarMul returns Σ scalars[i]·elems[i] (serial; not constant-time).
 func VartimeMultiscalarMul(scalars []secp256k1.ModNScalar, elems []secp256k1.JacobianPoint) *secp256k1.JacobianPoint {
 	if len(scalars) != len(elems) {
 		return nil

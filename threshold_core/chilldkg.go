@@ -516,10 +516,8 @@ func (p SessionParams) BIPParticipantStep1(hostseckey, random, leaderSecret []by
 	// SimplPedPop: derive coeffs from the seed, then commit + share.
 	coeffs := bipVSSGenerate(simplSeed[:], t)
 
-	// Role assignment (leader/slave sessions only; no-op when leader == nil). The
-	// leader overrides its constant term with the fixed leaderSecret so the group key
-	// is stable across re-DKGs; a slave contributes the identity element (a0 = 0). The
-	// non-constant coeffs stay seed-derived (randomization) for every role.
+	// Role assignment (no-op when leader == nil): the leader pins a0 = leaderSecret so
+	// the group key is stable across re-DKGs; a slave sets a0 = 0 (identity element).
 	self := p.IDs()[idx]
 	slave := leader != nil && !isLeaderID(self, leader)
 	if isLeaderID(self, leader) {
@@ -545,9 +543,8 @@ func (p SessionParams) BIPParticipantStep1(hostseckey, random, leaderSecret []by
 		return nil, err
 	}
 
-	// Proof-of-possession over idx, signed with the VSS secret a0. A slave has no
-	// secret (a0 = identity, which bipSchnorrSign would reject), so it carries a zero
-	// placeholder that the role-aware verifier in step2 skips.
+	// PoP over idx signed with a0. A slave has no secret, so it sends a zero
+	// placeholder (which step2's role-aware verifier skips).
 	var pop []byte
 	if slave {
 		pop = make([]byte, schnorrSigLen)
@@ -707,16 +704,14 @@ func (p SessionParams) BIPCoordinatorStep1(pmsgs [][]byte, leader *Identifier) (
 // parseBIPCmsg1 splits cmsg1 and assembles sum_coms (Coeffs[0]=Σ coms_to_secrets,
 // Coeffs[1:]=summed non-constant terms).
 func parseBIPCmsg1(b []byte, t, n int) (comsToSecrets []CoefficientCommitment, sumComs VerifiableSecretSharingCommitment, pops, pubnonces [][]byte, encSecshares []secp.ModNScalar, err error) {
-	// cmsg1 is produced by the coordinator, so any malformed field is its fault
-	// (a degenerate per-participant value is caught later by the caller).
+	// cmsg1 is the coordinator's output, so a malformed field is its fault.
 	if len(b) != cmsg1Len(t, n) {
 		err = &BIPFaultyCoordinatorError{Reason: "invalid cmsg1"}
 		return
 	}
 	off := 0
 
-	// coms_to_secrets: infinity is a valid encoding (a degenerate commitment),
-	// checked per-participant by the caller; only a bad encoding fails here.
+	// coms_to_secrets: infinity is valid (a slave's commitment); the caller checks it.
 	comsToSecrets = make([]CoefficientCommitment, n)
 	for i := 0; i < n; i++ {
 		if comsToSecrets[i], err = decodePointWithInfinity(b[off : off+compressedPointLen]); err != nil {
@@ -772,10 +767,9 @@ func decodePointWithInfinity(b []byte) (secp.JacobianPoint, error) {
 	return elemDeserializeCompressed(b)
 }
 
-// encodePointWithInfinity is the inverse of decodePointWithInfinity: the point at
-// infinity (identity element) serializes to compressedPointLen zero bytes, any
-// other point to its normal compressed encoding. Non-identity points are byte-
-// identical to elemSerializeCompressed, so this is safe to use everywhere.
+// encodePointWithInfinity is the inverse of decodePointWithInfinity: the identity
+// element serializes to compressedPointLen zero bytes, any other point to its normal
+// compressed encoding (byte-identical to elemSerializeCompressed).
 func encodePointWithInfinity(pt secp.JacobianPoint) ([]byte, error) {
 	if isInfinity(pt) {
 		return make([]byte, compressedPointLen), nil
