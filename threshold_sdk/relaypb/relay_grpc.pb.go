@@ -21,6 +21,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	Relay_Send_FullMethodName      = "/relay.v1.Relay/Send"
 	Relay_Subscribe_FullMethodName = "/relay.v1.Relay/Subscribe"
+	Relay_Join_FullMethodName      = "/relay.v1.Relay/Join"
 )
 
 // RelayClient is the client API for Relay service.
@@ -35,6 +36,10 @@ type RelayClient interface {
 	Send(ctx context.Context, in *Envelope, opts ...grpc.CallOption) (*Ack, error)
 	// Subscribe streams the messages addressed to addr (broadcasts + unicasts).
 	Subscribe(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Envelope], error)
+	// Join registers a new party with the leader (leader/slave sessions). The leader
+	// verifies the proof, assigns the party's queue, and (on its own schedule) triggers
+	// a re-DKG. The caller may Subscribe once Join returns.
+	Join(ctx context.Context, in *JoinRequest, opts ...grpc.CallOption) (*JoinResponse, error)
 }
 
 type relayClient struct {
@@ -74,6 +79,16 @@ func (c *relayClient) Subscribe(ctx context.Context, in *SubscribeRequest, opts 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Relay_SubscribeClient = grpc.ServerStreamingClient[Envelope]
 
+func (c *relayClient) Join(ctx context.Context, in *JoinRequest, opts ...grpc.CallOption) (*JoinResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(JoinResponse)
+	err := c.cc.Invoke(ctx, Relay_Join_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RelayServer is the server API for Relay service.
 // All implementations must embed UnimplementedRelayServer
 // for forward compatibility.
@@ -86,6 +101,10 @@ type RelayServer interface {
 	Send(context.Context, *Envelope) (*Ack, error)
 	// Subscribe streams the messages addressed to addr (broadcasts + unicasts).
 	Subscribe(*SubscribeRequest, grpc.ServerStreamingServer[Envelope]) error
+	// Join registers a new party with the leader (leader/slave sessions). The leader
+	// verifies the proof, assigns the party's queue, and (on its own schedule) triggers
+	// a re-DKG. The caller may Subscribe once Join returns.
+	Join(context.Context, *JoinRequest) (*JoinResponse, error)
 	mustEmbedUnimplementedRelayServer()
 }
 
@@ -101,6 +120,9 @@ func (UnimplementedRelayServer) Send(context.Context, *Envelope) (*Ack, error) {
 }
 func (UnimplementedRelayServer) Subscribe(*SubscribeRequest, grpc.ServerStreamingServer[Envelope]) error {
 	return status.Error(codes.Unimplemented, "method Subscribe not implemented")
+}
+func (UnimplementedRelayServer) Join(context.Context, *JoinRequest) (*JoinResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Join not implemented")
 }
 func (UnimplementedRelayServer) mustEmbedUnimplementedRelayServer() {}
 func (UnimplementedRelayServer) testEmbeddedByValue()               {}
@@ -152,6 +174,24 @@ func _Relay_Subscribe_Handler(srv interface{}, stream grpc.ServerStream) error {
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Relay_SubscribeServer = grpc.ServerStreamingServer[Envelope]
 
+func _Relay_Join_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(JoinRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayServer).Join(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Relay_Join_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayServer).Join(ctx, req.(*JoinRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Relay_ServiceDesc is the grpc.ServiceDesc for Relay service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -162,6 +202,10 @@ var Relay_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Send",
 			Handler:    _Relay_Send_Handler,
+		},
+		{
+			MethodName: "Join",
+			Handler:    _Relay_Join_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

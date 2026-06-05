@@ -1,159 +1,103 @@
 package thresholdsdk
 
 import (
-	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
+	"io"
 
-	core "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
+	thres "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
-// ErrSelfNotInParams is returned when the host key's public key matches no
-// participant in the session parameters.
-var ErrSelfNotInParams = errors.New("thresholdsdk: host key not among session participants")
+// participant runs the key-holder side of the BIP ChillDKG protocol over a
+// Transport: pmsg1 → cmsg1 → pmsg2 → cmsg2 → finalize.
+type participant struct {
+	Params    thres.SessionParams
+	Self      thres.Identifier
+	HostSk    *secp.PrivateKey
+	Rng       io.Reader
+	Transport Transport
+	// CoordAddr is the coordinator's transport address (defaults to CoordinatorAddr).
+	CoordAddr string
 
-// Participant runs the key-holder side of a ChillDKG ceremony over gRPC and
-// persists the public RecoveryData blob. No secret is stored: its share is
-// recovered on demand from the blob plus its host key.
-type Participant struct {
-	params    core.SessionParams
-	self      core.Identifier
-	hostSk    *secp.PrivateKey
-	coordAddr string
-	store     Store
+	// Leader/follower config — an SDK setting, NOT part of SessionParams (which stays
+	// byte-identical to the BIP spec). nil => classic egalitarian session. When
+	// non-nil it names the session leader; LeaderSecret carries the leader's fixed a0
+	// (set only when Self == *Leader; nil for followers and classic).
+	Leader       *thres.Identifier
+	LeaderSecret []byte
 }
 
-// HostKeyFromHex parses a hex-encoded 32-byte secp256k1 host secret, rejecting an
-// out-of-range length and the zero key. It is a convenience for callers holding
-// the secret as a string; the SDK itself takes a *secp.PrivateKey.
-func HostKeyFromHex(s string) (*secp.PrivateKey, error) {
-	const hostSecretLen = 32
-	b, err := hex.DecodeString(s)
+func (p *participant) coord() string {
+	if p.CoordAddr == "" {
+		return CoordinatorAddr
+	}
+	return p.CoordAddr
+}
+
+// Run executes the two BIP rounds and finalize, returning the participant's DKG
+// output and the recovery blob (eq_input ‖ certificate).
+func (p *participant) Run(ctx context.Context) (thres.BIPDKGOutput, []byte, error) {
+	hostseckey := p.HostSk.Serialize()
+
+	// Fresh per-run randomness: `random` seeds the deterministic key generation,
+	// `auxRand` is the BIP340 auxiliary randomness for the CertEq signature.
+	random := make([]byte, 32)
+	if _, err := io.ReadFull(p.Rng, random); err != nil {
+		return thres.BIPDKGOutput{}, nil, err
+	}
+	auxRand := make([]byte, 32)
+	if _, err := io.ReadFull(p.Rng, auxRand); err != nil {
+		return thres.BIPDKGOutput{}, nil, err
+	}
+
+	// Round 1.
+	pmsg1, err := p.Params.BIPParticipantStep1(hostseckey, random, p.LeaderSecret, p.Leader)
 	if err != nil {
-		return nil, err
+		return thres.BIPDKGOutput{}, nil, err
 	}
-	if len(b) != hostSecretLen {
-		return nil, errors.New("thresholdsdk: host secret must be 32 bytes")
+	if err := p.Transport.SendTo(ctx, p.coord(), Message{Type: msgPmsg1, Payload: pmsg1}); err != nil {
+		return thres.BIPDKGOutput{}, nil, err
 	}
-	sk := secp.PrivKeyFromBytes(b)
-	if sk.Key.IsZero() {
-		return nil, errors.New("thresholdsdk: host secret is zero")
-	}
-	return sk, nil
-}
 
-// NewParticipant builds a participant for params. self is found by matching
-// hostSk's public key against params.HostPubs (host keys are unique), so no
-// identifier need be supplied. coordinatorAddr is the relay's gRPC address; store
-// persists the outputs.
-func NewParticipant(params core.SessionParams, hostSk *secp.PrivateKey, coordinatorAddr string, store Store) (*Participant, error) {
-	if err := params.Validate(); err != nil {
-		return nil, err
-	}
-	if hostSk == nil {
-		return nil, errors.New("thresholdsdk: nil host key")
-	}
-	if store == nil {
-		return nil, errors.New("thresholdsdk: nil store")
-	}
-	self, err := identify(params, hostSk.PubKey())
+	cm1, err := waitFor(ctx, p.Transport.Inbox(), msgCmsg1)
 	if err != nil {
-		return nil, err
+		return thres.BIPDKGOutput{}, nil, err
 	}
-	return &Participant{
-		params:    params,
-		self:      self,
-		hostSk:    hostSk,
-		coordAddr: coordinatorAddr,
-		store:     store,
-	}, nil
-}
+	cmsg1 := cm1.Payload
 
-// identify returns the identifier whose host public key matches pub.
-func identify(params core.SessionParams, pub *secp.PublicKey) (core.Identifier, error) {
-	want := pub.SerializeCompressed()
-	for id, p := range params.HostPubs {
-		if p != nil && bytes.Equal(p.SerializeCompressed(), want) {
-			return id, nil
+	// Round 2: verify peers + own share, then emit the CertEq signature (pmsg2).
+	pmsg2, err := p.Params.BIPParticipantStep2(hostseckey, random, cmsg1, auxRand, p.LeaderSecret, p.Leader)
+	if err != nil {
+		// A failed share check is attributable: request the coordinator's investigation
+		// message and pin the faulty party.
+		if errors.Is(err, thres.ErrInvalidSecretShare) {
+			if serr := p.Transport.SendTo(ctx, p.coord(), Message{Type: msgInvRequest}); serr != nil {
+				return thres.BIPDKGOutput{}, nil, serr
+			}
+			inv, ierr := waitFor(ctx, p.Transport.Inbox(), msgCinv)
+			if ierr != nil {
+				return thres.BIPDKGOutput{}, nil, &thres.BIPFaultyCoordinatorError{Reason: "no investigation data"}
+			}
+			return thres.BIPDKGOutput{}, nil, p.Params.BIPParticipantInvestigate(hostseckey, cmsg1, inv.Payload)
 		}
+		return thres.BIPDKGOutput{}, nil, err
 	}
-	return core.Identifier{}, ErrSelfNotInParams
+	if err := p.Transport.SendTo(ctx, p.coord(), Message{Type: msgPmsg2, Payload: pmsg2}); err != nil {
+		return thres.BIPDKGOutput{}, nil, err
+	}
+
+	// Await the certificate (cmsg2) or an abort (another participant faulted).
+	m, err := waitForAny(ctx, p.Transport.Inbox(), msgCmsg2, msgAbort)
+	if err != nil {
+		return thres.BIPDKGOutput{}, nil, err
+	}
+	if m.Type == msgAbort {
+		return thres.BIPDKGOutput{}, nil, ErrCeremonyAborted
+	}
+	out, rec, err := p.Params.BIPParticipantFinalize(hostseckey, cmsg1, m.Payload)
+	if err != nil {
+		return thres.BIPDKGOutput{}, nil, err
+	}
+	return out, rec, nil
 }
-
-// Run executes the ceremony over gRPC and persists the public RecoveryData blob
-// keyed by the produced group verifying key, returning the key package. Each call
-// runs a fresh ceremony (a new key); it is not idempotent.
-func (p *Participant) Run(ctx context.Context) (core.KeyPackage, error) {
-	// Fresh per-run contribution material — never derived from the host key.
-	sec, err := secp.GeneratePrivateKey()
-	if err != nil {
-		return core.KeyPackage{}, err
-	}
-	coeffs, err := core.GenerateCoefficients(p.params.T)
-	if err != nil {
-		return core.KeyPackage{}, err
-	}
-
-	client, err := NewClient(p.coordAddr, p.self)
-	if err != nil {
-		return core.KeyPackage{}, err
-	}
-	defer client.Close()
-	if err := client.Start(ctx); err != nil {
-		return core.KeyPackage{}, err
-	}
-
-	driver := &dkgParticipant{
-		Params:    p.params,
-		Self:      p.self,
-		HostSk:    p.hostSk,
-		Secret:    core.SecretKey{Scalar: sec.Key},
-		Coeffs:    coeffs,
-		Rng:       rand.Reader,
-		Transport: client,
-	}
-	out, rec, err := driver.Run(ctx)
-	if err != nil {
-		return core.KeyPackage{}, err
-	}
-
-	blob, err := rec.Serialize()
-	if err != nil {
-		return core.KeyPackage{}, err
-	}
-	groupKey, err := out.Key.VerifyingKey.SerializeCompressed()
-	if err != nil {
-		return core.KeyPackage{}, err
-	}
-	if err := p.store.PutRecovery(groupKey, blob); err != nil {
-		return core.KeyPackage{}, err
-	}
-	return out.Key, nil
-}
-
-// LoadKeyPackage reconstructs the key package for the given group verifying key
-// (33-byte compressed) from storage: it parses the stored RecoveryData and
-// recovers the share with the host secret. RecoverShare re-verifies the success
-// certificate and re-checks the share against the certified group commitment, so
-// the returned package is trusted without any secret being kept at rest.
-func (p *Participant) LoadKeyPackage(groupKey []byte) (core.KeyPackage, error) {
-	blob, err := p.store.GetRecovery(groupKey)
-	if err != nil {
-		return core.KeyPackage{}, err
-	}
-	rd, err := core.ParseRecoveryData(blob)
-	if err != nil {
-		return core.KeyPackage{}, err
-	}
-	out, err := core.RecoverShare(rd, p.hostSk)
-	if err != nil {
-		return core.KeyPackage{}, err
-	}
-	return out.Key, nil
-}
-
-// Close closes the injected store.
-func (p *Participant) Close() error { return p.store.Close() }

@@ -15,7 +15,7 @@ type VerifiableSecretSharingCommitment struct {
 func (vss VerifiableSecretSharingCommitment) MarshalJSON() ([]byte, error) {
 	out := make([]string, len(vss.Coeffs))
 	for i, c := range vss.Coeffs {
-		b, err := elemSerializeCompressed(c)
+		b, err := encodePointWithInfinity(c)
 		if err != nil {
 			return nil, err
 		}
@@ -29,7 +29,7 @@ func (vss VerifiableSecretSharingCommitment) MarshalJSON() ([]byte, error) {
 func (vss VerifiableSecretSharingCommitment) SerializeCompressed() ([]byte, error) {
 	out := make([]byte, 0, compressedPointLen*len(vss.Coeffs))
 	for _, c := range vss.Coeffs {
-		b, err := elemSerializeCompressed(c)
+		b, err := encodePointWithInfinity(c)
 		if err != nil {
 			return nil, err
 		}

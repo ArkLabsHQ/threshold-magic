@@ -320,9 +320,18 @@ func DecryptAndVerifyShare(
 	return SecretShare(s), nil
 }
 
-// isInfinity reports whether a Jacobian point is the point at infinity (Z == 0).
+// isInfinity reports whether a Jacobian point is the identity element. dcrec uses
+// two representations: the canonical Jacobian infinity (Z == 0) and the affine point
+// (0, 0) with Z != 0 (e.g. the result of ScalarBaseMultNonConst(0) = g^0). Both are
+// detected. No valid curve point has both affine coordinates zero — x = 0 admits
+// only y = ±√7 != 0 — so the affine-(0,0) test is exact.
 func isInfinity(p secp.JacobianPoint) bool {
-	return p.Z.IsZero()
+	if p.Z.IsZero() {
+		return true
+	}
+	a := p
+	a.ToAffine()
+	return a.X.IsZero() && a.Y.IsZero()
 }
 
 // BIP-exact EncPedPop (bip-frost-dkg): byte-exact encryption/hashing for the BIP

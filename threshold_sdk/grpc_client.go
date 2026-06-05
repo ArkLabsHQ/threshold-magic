@@ -66,6 +66,22 @@ func (c *Client) Start(ctx context.Context) error {
 	return nil
 }
 
+// Join registers with the leader (leader/follower sessions) and adopts the assigned
+// identifier as this client's address. Call it before Start: the client has no usable
+// address until the leader admits it.
+func (c *Client) Join(ctx context.Context, hostPubkey, proof []byte) (thres.Identifier, error) {
+	resp, err := c.client.Join(ctx, &relaypb.JoinRequest{HostPubkey: hostPubkey, Proof: proof})
+	if err != nil {
+		return thres.Identifier{}, err
+	}
+	id, err := thres.DeserializeIdentifier(resp.Identifier)
+	if err != nil {
+		return thres.Identifier{}, err
+	}
+	c.self = addr(id)
+	return id, nil
+}
+
 // Inbox returns the channel of messages addressed to this participant.
 func (c *Client) Inbox() <-chan Message { return c.inbox }
 

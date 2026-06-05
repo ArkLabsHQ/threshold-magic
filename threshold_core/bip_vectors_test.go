@@ -214,7 +214,7 @@ func TestBIPCoordinatorStep1Vectors(t *testing.T) {
 			for i, idx := range c.Indices {
 				pmsgs[i] = bipHexDecode(t, dv.Pool[idx])
 			}
-			got, err := params.BIPCoordinatorStep1(pmsgs)
+			got, err := params.BIPCoordinatorStep1(pmsgs, nil)
 			require.NoErrorf(t, err, "tc %d: %s", c.TCID, c.Comment)
 			require.Equalf(t, strings.ToLower(c.Expected), hex.EncodeToString(got), "tc %d: %s", c.TCID, c.Comment)
 		})
@@ -229,7 +229,7 @@ func TestBIPCoordinatorStep1Vectors(t *testing.T) {
 				for i, idx := range c.Indices {
 					pmsgs[i] = bipHexDecode(t, dv.Pool[idx])
 				}
-				_, err := params.BIPCoordinatorStep1(pmsgs)
+				_, err := params.BIPCoordinatorStep1(pmsgs, nil)
 				assertBIPError(t, err, c.Expected.Type, c.Expected.Participant, c.TCID, c.Comment)
 				return
 			}
@@ -270,14 +270,14 @@ func TestBIPParticipantStep2Vectors(t *testing.T) {
 	aux := bipHexDecode(t, dv.AuxRand)
 	for _, c := range dv.Valid {
 		t.Run(fmt.Sprintf("valid_tc%d", c.TCID), func(t *testing.T) {
-			got, err := params.BIPParticipantStep2(hostseckey, random, bipHexDecode(t, c.Cmsg1), aux)
+			got, err := params.BIPParticipantStep2(hostseckey, random, bipHexDecode(t, c.Cmsg1), aux, nil, nil)
 			require.NoErrorf(t, err, "tc %d: %s", c.TCID, c.Comment)
 			require.Equalf(t, strings.ToLower(c.Expected), hex.EncodeToString(got), "tc %d: %s", c.TCID, c.Comment)
 		})
 	}
 	for _, c := range dv.Error {
 		t.Run(fmt.Sprintf("error_tc%d", c.TCID), func(t *testing.T) {
-			_, err := params.BIPParticipantStep2(hostseckey, random, bipHexDecode(t, c.Cmsg1), aux)
+			_, err := params.BIPParticipantStep2(hostseckey, random, bipHexDecode(t, c.Cmsg1), aux, nil, nil)
 			assertBIPError(t, err, c.Expected.Type, c.Expected.Participant, c.TCID, c.Comment)
 		})
 	}
@@ -471,7 +471,7 @@ func TestBIPCoordinatorInvestigateVectors(t *testing.T) {
 	}
 	for _, c := range dv.Valid {
 		t.Run(fmt.Sprintf("valid_tc%d", c.TCID), func(t *testing.T) {
-			cinvs, err := params.BIPCoordinatorInvestigate(pmsgs)
+			cinvs, err := params.BIPCoordinatorInvestigate(pmsgs, nil)
 			require.NoErrorf(t, err, "tc %d: %s", c.TCID, c.Comment)
 			require.Lenf(t, cinvs, len(c.Expected), "tc %d cinv count", c.TCID)
 			for i, e := range c.Expected {
@@ -552,7 +552,7 @@ func TestBIPParticipantStep1Vectors(t *testing.T) {
 	for _, c := range dv.Valid {
 		t.Run(fmt.Sprintf("valid_tc%d", c.TCID), func(t *testing.T) {
 			params := c.Params.session(t)
-			got, err := params.BIPParticipantStep1(bipHexDecode(t, c.Hostseckey), bipHexDecode(t, c.Random))
+			got, err := params.BIPParticipantStep1(bipHexDecode(t, c.Hostseckey), bipHexDecode(t, c.Random), nil, nil)
 			require.NoErrorf(t, err, "tc %d: %s", c.TCID, c.Comment)
 			require.Equalf(t, strings.ToLower(c.Expected), hex.EncodeToString(got), "tc %d: %s", c.TCID, c.Comment)
 		})
@@ -567,10 +567,10 @@ func TestBIPParticipantStep1Vectors(t *testing.T) {
 			case "HostSeckeyError":
 				// Now representable: wrong-length → ErrSeckeyLen; a valid key not among
 				// the params → ErrNotInParams (both map to HostSeckeyError).
-				_, err := c.Params.session(t).BIPParticipantStep1(bipHexDecode(t, c.Hostseckey), bipHexDecode(t, c.Random))
+				_, err := c.Params.session(t).BIPParticipantStep1(bipHexDecode(t, c.Hostseckey), bipHexDecode(t, c.Random), nil, nil)
 				assertBIPError(t, err, c.Expected.Type, c.Expected.Participant, c.TCID, c.Comment)
 			case "RandomnessError":
-				_, err := c.Params.session(t).BIPParticipantStep1(bipHexDecode(t, c.Hostseckey), bipHexDecode(t, c.Random))
+				_, err := c.Params.session(t).BIPParticipantStep1(bipHexDecode(t, c.Hostseckey), bipHexDecode(t, c.Random), nil, nil)
 				assertBIPError(t, err, c.Expected.Type, c.Expected.Participant, c.TCID, c.Comment)
 			default:
 				t.Fatalf("tc %d: unhandled error type %q", c.TCID, c.Expected.Type)

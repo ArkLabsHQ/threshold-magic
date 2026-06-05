@@ -1,10 +1,11 @@
-// Command dkgnode is a test-only harness that runs one role of a ChillDKG
-// ceremony from environment configuration, for the Docker integration test. It
+// Command dkgnode is a test-only harness that runs one role of a leader/follower
+// ChillDKG group from environment configuration, for the Docker integration test. It
 // is not part of the SDK's public surface and never imports testcontainers.
 //
-// Env: ROLE (coordinator|participant), LISTEN_ADDR (coordinator, e.g. ":9000"),
-// COORD_ADDR (participant, e.g. "coordinator:9000"), HOST_SECRET (participant,
-// 32-byte hex), SESSION (the shared session descriptor as JSON).
+// Env: ROLE (leader|follower); HOST_SECRET (both, 32-byte hex); LISTEN_ADDR (leader,
+// e.g. ":9000"); COORD_ADDR (follower, e.g. "leader:9000"); LEADER_PUB (follower, hex
+// of the leader's 33-byte compressed host pubkey, pinned to verify the leader's
+// signed commands).
 package main
 
 import (
@@ -12,12 +13,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"time"
 
-	core "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	sdk "thresholdsdk"
-	itest "thresholdsdkintegration"
 )
 
 func main() {
@@ -28,13 +26,9 @@ func main() {
 }
 
 func run() error {
-	d, err := itest.ParseSessionDescriptor(os.Getenv("SESSION"))
+	sk, err := sdk.HostKeyFromHex(os.Getenv("HOST_SECRET"))
 	if err != nil {
-		return fmt.Errorf("parse SESSION: %w", err)
-	}
-	params, err := d.Params()
-	if err != nil {
-		return fmt.Errorf("build params: %w", err)
+		return fmt.Errorf("HOST_SECRET: %w", err)
 	}
 	store, err := sdk.OpenBadgerStore("")
 	if err != nil {
@@ -42,52 +36,40 @@ func run() error {
 	}
 	defer store.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	defer cancel()
+	ctx := context.Background()
 
 	switch role := os.Getenv("ROLE"); role {
-	case "coordinator":
-		c, err := sdk.NewCoordinator(params, os.Getenv("LISTEN_ADDR"), store)
+	case "leader":
+		l, err := sdk.NewLeader(sk, os.Getenv("LISTEN_ADDR"), store)
 		if err != nil {
 			return err
 		}
-		// Listener is bound by NewCoordinator; the gRPC server starts inside Run,
-		// so announce readiness and then drive the ceremony immediately.
-		fmt.Println("COORD-LISTENING", c.Addr().String())
-		if _, err := c.Run(ctx); err != nil {
-			return err
-		}
-		fmt.Println("COORD-OK")
+		fmt.Println("LEADER-LISTENING", l.Addr().String())
+		fmt.Println("LEADER-HOSTPUB=" + hex.EncodeToString(sk.PubKey().SerializeCompressed()))
+		return l.Serve(ctx) // long-lived: serves the relay + re-DKGs as followers join
 
-	case "participant":
-		sk, err := sdk.HostKeyFromHex(os.Getenv("HOST_SECRET"))
+	case "follower":
+		pkb, err := hex.DecodeString(os.Getenv("LEADER_PUB"))
+		if err != nil {
+			return fmt.Errorf("LEADER_PUB: %w", err)
+		}
+		leaderPub, err := secp.ParsePubKey(pkb)
+		if err != nil {
+			return fmt.Errorf("LEADER_PUB: %w", err)
+		}
+		f, err := sdk.NewJoiningFollower(sk, os.Getenv("COORD_ADDR"), leaderPub, store)
 		if err != nil {
 			return err
 		}
-		p, err := sdk.NewParticipant(params, sk, os.Getenv("COORD_ADDR"), store)
-		if err != nil {
-			return err
-		}
-		kp, err := p.Run(ctx)
-		if err != nil {
-			return err
-		}
-		fmt.Println("RESULT=" + groupVKHex(kp))
-		fmt.Println("DKG-OK")
-
+		// Announce the group key each time this follower obtains a share. All honest
+		// members derive the same key, so it is the agreement signal.
+		go func() {
+			for out := range f.Keys() {
+				fmt.Println("DKG-OK RESULT=" + hex.EncodeToString(out.ThresholdPubkey))
+			}
+		}()
+		return f.Serve(ctx) // long-lived: join, then participate in every re-DKG
 	default:
 		return fmt.Errorf("unknown ROLE %q", role)
 	}
-
-	// Stay alive so the test can scrape logs and control teardown.
-	select {}
-}
-
-// groupVKHex encodes the group verifying key (compressed secp256k1 point) as hex.
-// All honest participants derive the same group key, so it is the agreement signal
-// (params_id is not — it is input-derived and identical by construction).
-func groupVKHex(kp core.KeyPackage) string {
-	e := kp.VerifyingKey.E // value copy; safe to normalize in place
-	e.ToAffine()
-	return hex.EncodeToString(secp.NewPublicKey(&e.X, &e.Y).SerializeCompressed())
 }

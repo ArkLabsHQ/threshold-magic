@@ -1,13 +1,13 @@
 package thresholdsdk
 
-// Insecure gRPC transport: the coordinator runs Server (a gRPC relay); each
-// participant runs Client. Both implement Transport, with the same semantics as
-// MemHub.
+// Insecure gRPC transport: the leader runs Server (a gRPC relay); each follower
+// runs Client. Both implement Transport.
 
 import (
 	"context"
 	"encoding/hex"
 	"net"
+	"sync"
 	"time"
 
 	thres "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
@@ -19,8 +19,7 @@ import (
 
 //go:generate protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative relaypb/relay.proto
 
-// chanBuf is the per-endpoint inbox buffer size, shared by the gRPC server/client
-// and the in-memory MemHub.
+// chanBuf is the per-endpoint inbox buffer size (gRPC server and client).
 const chanBuf = 256
 
 // gracefulStopTimeout bounds GracefulStop on Close before a hard Stop.
@@ -44,28 +43,60 @@ func fromEnvelope(e *relaypb.Envelope) Message {
 type Server struct {
 	relaypb.UnimplementedRelayServer
 
-	inbox chan Message            // messages addressed to the coordinator
-	subs  map[string]chan Message // per-participant queues; immutable after New
+	inbox chan Message // messages addressed to the coordinator
+
+	mu   sync.RWMutex            // guards subs (mutated by Join/ban in leader sessions)
+	subs map[string]chan Message // per-participant queues
+
+	// onJoin, when set (leader/follower sessions), admits a new party: it verifies the
+	// request, creates the party's queue (addSub), and returns its identifier. nil in
+	// a classic coordinator session, where Join is unsupported.
+	onJoin func(hostPubkey, proof []byte) (thres.Identifier, error)
 
 	grpc *grpc.Server
 	lis  net.Listener
 }
 
+// addSub creates (idempotently) the queue for addr and returns it.
+func (s *Server) addSub(addr string) chan Message {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ch, ok := s.subs[addr]
+	if !ok {
+		ch = make(chan Message, chanBuf)
+		s.subs[addr] = ch
+	}
+	return ch
+}
+
+// removeSub drops addr's queue from the routing table. It does not close the channel
+// (a concurrent Broadcast may hold a snapshot of it); the removed party disconnects
+// on the msgRemoved it was sent just before, ending its Subscribe stream.
+func (s *Server) removeSub(addr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.subs, addr)
+}
+
+// sub looks up addr's queue.
+func (s *Server) sub(addr string) (chan Message, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ch, ok := s.subs[addr]
+	return ch, ok
+}
+
 var _ Transport = (*Server)(nil)
 
-// NewServer pre-creates the coordinator inbox and one buffered queue per
-// participant (from params.IDs()), then registers the gRPC service on lis.
-// Pre-creating the queues is required: a broadcast is buffered for a participant
-// that has not Subscribed yet, exactly like MemHub.Endpoint.
-func NewServer(params thres.SessionParams, lis net.Listener) *Server {
+// newDynamicServer creates the leader's relay with no pre-created participant
+// queues — the leader/follower daemon adds them as members join (addSub) and drops
+// them on ban (removeSub).
+func newDynamicServer(lis net.Listener) *Server {
 	s := &Server{
 		inbox: make(chan Message, chanBuf),
-		subs:  make(map[string]chan Message, params.N),
+		subs:  make(map[string]chan Message),
 		grpc:  grpc.NewServer(),
 		lis:   lis,
-	}
-	for _, id := range params.IDs() {
-		s.subs[addr(id)] = make(chan Message, chanBuf)
 	}
 	relaypb.RegisterRelayServer(s.grpc, s)
 	return s
@@ -92,7 +123,7 @@ func (s *Server) Close() {
 // --- gRPC RelayServer ---
 
 // Send routes a participant's message by its To field: to the coordinator inbox,
-// or to a participant queue (unknown recipients are dropped, mirroring MemHub).
+// or to a participant queue (unknown recipients are dropped).
 func (s *Server) Send(ctx context.Context, env *relaypb.Envelope) (*relaypb.Ack, error) {
 	if env.To == "" {
 		return nil, status.Error(codes.InvalidArgument, "empty to")
@@ -106,7 +137,7 @@ func (s *Server) Send(ctx context.Context, env *relaypb.Envelope) (*relaypb.Ack,
 		}
 		return &relaypb.Ack{}, nil
 	}
-	if ch, ok := s.subs[env.To]; ok {
+	if ch, ok := s.sub(env.To); ok {
 		select {
 		case ch <- msg:
 		case <-ctx.Done():
@@ -121,7 +152,7 @@ func (s *Server) Subscribe(req *relaypb.SubscribeRequest, stream relaypb.Relay_S
 	if req.Addr == "" {
 		return status.Error(codes.InvalidArgument, "empty addr")
 	}
-	ch, ok := s.subs[req.Addr]
+	ch, ok := s.sub(req.Addr)
 	if !ok {
 		return status.Error(codes.NotFound, "unknown addr")
 	}
@@ -137,6 +168,20 @@ func (s *Server) Subscribe(req *relaypb.SubscribeRequest, stream relaypb.Relay_S
 	}
 }
 
+// Join admits a new party in a leader/follower session via the onJoin callback (which
+// verifies the request and creates the party's queue). Unsupported in a classic
+// coordinator session (onJoin nil).
+func (s *Server) Join(ctx context.Context, req *relaypb.JoinRequest) (*relaypb.JoinResponse, error) {
+	if s.onJoin == nil {
+		return nil, status.Error(codes.Unimplemented, "join not supported")
+	}
+	id, err := s.onJoin(req.HostPubkey, req.Proof)
+	if err != nil {
+		return nil, status.Error(codes.PermissionDenied, err.Error())
+	}
+	return &relaypb.JoinResponse{Identifier: id.Serialize()}, nil
+}
+
 // --- Transport (coordinator side) ---
 
 // Inbox returns the channel of messages addressed to the coordinator.
@@ -146,7 +191,15 @@ func (s *Server) Inbox() <-chan Message { return s.inbox }
 // it is naturally excluded), setting From to the coordinator.
 func (s *Server) Broadcast(ctx context.Context, msg Message) error {
 	msg.From = CoordinatorAddr
+	// Snapshot the channels under the read lock so a concurrent Join/ban can't race
+	// the iteration.
+	s.mu.RLock()
+	chans := make([]chan Message, 0, len(s.subs))
 	for _, ch := range s.subs {
+		chans = append(chans, ch)
+	}
+	s.mu.RUnlock()
+	for _, ch := range chans {
 		select {
 		case ch <- msg:
 		case <-ctx.Done():
@@ -160,7 +213,7 @@ func (s *Server) Broadcast(ctx context.Context, msg Message) error {
 func (s *Server) SendTo(ctx context.Context, to string, msg Message) error {
 	msg.From = CoordinatorAddr
 	msg.To = to
-	ch, ok := s.subs[to]
+	ch, ok := s.sub(to)
 	if !ok {
 		return nil
 	}

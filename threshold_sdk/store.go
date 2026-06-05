@@ -20,10 +20,19 @@ type Store interface {
 	GetRecovery(groupKey []byte) ([]byte, error)
 	Has(groupKey []byte) (bool, error)
 	List() ([][]byte, error) // the group keys currently stored
+	// Leader-only persistence (leader/follower sessions). The leader generates its
+	// group secret a0 once and reuses it across re-DKGs, so the group public key is
+	// stable as members join or are banned. GetLeaderSecret returns ErrNotFound
+	// before the first PutLeaderSecret.
+	PutLeaderSecret(a0 []byte) error
+	GetLeaderSecret() ([]byte, error)
 	Close() error
 }
 
-const recoveryPrefix = "recovery/"
+const (
+	recoveryPrefix  = "recovery/"
+	leaderSecretKey = "leader/secret"
+)
 
 func recoveryKey(groupKey []byte) []byte { return append([]byte(recoveryPrefix), groupKey...) }
 
@@ -76,6 +85,9 @@ func (s *badgerStore) PutRecovery(groupKey, blob []byte) error {
 func (s *badgerStore) GetRecovery(groupKey []byte) ([]byte, error) {
 	return s.get(recoveryKey(groupKey))
 }
+
+func (s *badgerStore) PutLeaderSecret(a0 []byte) error { return s.put([]byte(leaderSecretKey), a0) }
+func (s *badgerStore) GetLeaderSecret() ([]byte, error) { return s.get([]byte(leaderSecretKey)) }
 
 func (s *badgerStore) Has(groupKey []byte) (bool, error) {
 	_, err := s.GetRecovery(groupKey)

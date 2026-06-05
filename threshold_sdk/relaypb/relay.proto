@@ -12,6 +12,10 @@ service Relay {
   rpc Send(Envelope) returns (Ack);
   // Subscribe streams the messages addressed to addr (broadcasts + unicasts).
   rpc Subscribe(SubscribeRequest) returns (stream Envelope);
+  // Join registers a new party with the leader (leader/slave sessions). The leader
+  // verifies the proof, assigns the party's queue, and (on its own schedule) triggers
+  // a re-DKG. The caller may Subscribe once Join returns.
+  rpc Join(JoinRequest) returns (JoinResponse);
 }
 
 // Envelope is the wire form of thresholdsdk.Message (1:1 fields).
@@ -26,4 +30,18 @@ message Ack {}
 
 message SubscribeRequest {
   string addr = 1;
+}
+
+// JoinRequest asks the leader to admit a new party. host_pubkey is the joiner's
+// 33-byte compressed host key; proof is a BIP340 signature by that key over the
+// join challenge (proving possession and binding the request to this leader).
+message JoinRequest {
+  bytes host_pubkey = 1;
+  bytes proof = 2;
+}
+
+// JoinResponse returns the leader-assigned participant identifier (serialized). The
+// joiner uses it as its transport address (hex) when it Subscribes.
+message JoinResponse {
+  bytes identifier = 1;
 }

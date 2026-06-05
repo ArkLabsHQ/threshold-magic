@@ -170,6 +170,107 @@ func (x *SubscribeRequest) GetAddr() string {
 	return ""
 }
 
+// JoinRequest asks the leader to admit a new party. host_pubkey is the joiner's
+// 33-byte compressed host key; proof is a BIP340 signature by that key over the
+// join challenge (proving possession and binding the request to this leader).
+type JoinRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	HostPubkey    []byte                 `protobuf:"bytes,1,opt,name=host_pubkey,json=hostPubkey,proto3" json:"host_pubkey,omitempty"`
+	Proof         []byte                 `protobuf:"bytes,2,opt,name=proof,proto3" json:"proof,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JoinRequest) Reset() {
+	*x = JoinRequest{}
+	mi := &file_relaypb_relay_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JoinRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JoinRequest) ProtoMessage() {}
+
+func (x *JoinRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_relaypb_relay_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JoinRequest.ProtoReflect.Descriptor instead.
+func (*JoinRequest) Descriptor() ([]byte, []int) {
+	return file_relaypb_relay_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *JoinRequest) GetHostPubkey() []byte {
+	if x != nil {
+		return x.HostPubkey
+	}
+	return nil
+}
+
+func (x *JoinRequest) GetProof() []byte {
+	if x != nil {
+		return x.Proof
+	}
+	return nil
+}
+
+// JoinResponse returns the leader-assigned participant identifier (serialized). The
+// joiner uses it as its transport address (hex) when it Subscribes.
+type JoinResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Identifier    []byte                 `protobuf:"bytes,1,opt,name=identifier,proto3" json:"identifier,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JoinResponse) Reset() {
+	*x = JoinResponse{}
+	mi := &file_relaypb_relay_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JoinResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JoinResponse) ProtoMessage() {}
+
+func (x *JoinResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_relaypb_relay_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JoinResponse.ProtoReflect.Descriptor instead.
+func (*JoinResponse) Descriptor() ([]byte, []int) {
+	return file_relaypb_relay_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *JoinResponse) GetIdentifier() []byte {
+	if x != nil {
+		return x.Identifier
+	}
+	return nil
+}
+
 var File_relaypb_relay_proto protoreflect.FileDescriptor
 
 const file_relaypb_relay_proto_rawDesc = "" +
@@ -182,10 +283,19 @@ const file_relaypb_relay_proto_rawDesc = "" +
 	"\apayload\x18\x04 \x01(\fR\apayload\"\x05\n" +
 	"\x03Ack\"&\n" +
 	"\x10SubscribeRequest\x12\x12\n" +
-	"\x04addr\x18\x01 \x01(\tR\x04addr2q\n" +
+	"\x04addr\x18\x01 \x01(\tR\x04addr\"D\n" +
+	"\vJoinRequest\x12\x1f\n" +
+	"\vhost_pubkey\x18\x01 \x01(\fR\n" +
+	"hostPubkey\x12\x14\n" +
+	"\x05proof\x18\x02 \x01(\fR\x05proof\".\n" +
+	"\fJoinResponse\x12\x1e\n" +
+	"\n" +
+	"identifier\x18\x01 \x01(\fR\n" +
+	"identifier2\xa8\x01\n" +
 	"\x05Relay\x12)\n" +
 	"\x04Send\x12\x12.relay.v1.Envelope\x1a\r.relay.v1.Ack\x12=\n" +
-	"\tSubscribe\x12\x1a.relay.v1.SubscribeRequest\x1a\x12.relay.v1.Envelope0\x01B\x1eZ\x1cthresholdsdk/relaypb;relaypbb\x06proto3"
+	"\tSubscribe\x12\x1a.relay.v1.SubscribeRequest\x1a\x12.relay.v1.Envelope0\x01\x125\n" +
+	"\x04Join\x12\x15.relay.v1.JoinRequest\x1a\x16.relay.v1.JoinResponseB\x1eZ\x1cthresholdsdk/relaypb;relaypbb\x06proto3"
 
 var (
 	file_relaypb_relay_proto_rawDescOnce sync.Once
@@ -199,19 +309,23 @@ func file_relaypb_relay_proto_rawDescGZIP() []byte {
 	return file_relaypb_relay_proto_rawDescData
 }
 
-var file_relaypb_relay_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_relaypb_relay_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_relaypb_relay_proto_goTypes = []any{
 	(*Envelope)(nil),         // 0: relay.v1.Envelope
 	(*Ack)(nil),              // 1: relay.v1.Ack
 	(*SubscribeRequest)(nil), // 2: relay.v1.SubscribeRequest
+	(*JoinRequest)(nil),      // 3: relay.v1.JoinRequest
+	(*JoinResponse)(nil),     // 4: relay.v1.JoinResponse
 }
 var file_relaypb_relay_proto_depIdxs = []int32{
 	0, // 0: relay.v1.Relay.Send:input_type -> relay.v1.Envelope
 	2, // 1: relay.v1.Relay.Subscribe:input_type -> relay.v1.SubscribeRequest
-	1, // 2: relay.v1.Relay.Send:output_type -> relay.v1.Ack
-	0, // 3: relay.v1.Relay.Subscribe:output_type -> relay.v1.Envelope
-	2, // [2:4] is the sub-list for method output_type
-	0, // [0:2] is the sub-list for method input_type
+	3, // 2: relay.v1.Relay.Join:input_type -> relay.v1.JoinRequest
+	1, // 3: relay.v1.Relay.Send:output_type -> relay.v1.Ack
+	0, // 4: relay.v1.Relay.Subscribe:output_type -> relay.v1.Envelope
+	4, // 5: relay.v1.Relay.Join:output_type -> relay.v1.JoinResponse
+	3, // [3:6] is the sub-list for method output_type
+	0, // [0:3] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -228,7 +342,7 @@ func file_relaypb_relay_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_relaypb_relay_proto_rawDesc), len(file_relaypb_relay_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   3,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

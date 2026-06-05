@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -22,21 +21,21 @@ import (
 )
 
 const (
-	dkgImage  = "thresholdsdk-dkgnode:itest"
-	numParts  = 4
-	threshold = 3
-	relayPort = "9000"
+	dkgImage     = "thresholdsdk-dkgnode:itest"
+	numFollowers = 4
+	relayPort    = "9000"
 )
 
-// TestDockerDistributedDKG runs a real DKG across 5 containers (1 coordinator +
-// 4 participants) over a Docker network and asserts every participant completes
-// and agrees on the same group key.
-func TestDockerDistributedDKG(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+// TestDockerLeaderFollowerDKG runs a real leader/follower DKG across containers (1
+// leader + N followers) over a Docker network: each follower joins dynamically, the
+// leader re-DKGs on every join, and every follower ends up holding a share of the
+// same group key (stable because the leader's secret a0 is fixed).
+func TestDockerLeaderFollowerDKG(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 
-	// Skip cleanly when Docker is unavailable (the build tag already keeps this
-	// out of the default test sweep).
+	// Skip cleanly when Docker is unavailable (the build tag already keeps this out
+	// of the default test sweep).
 	provider, err := testcontainers.NewDockerProvider()
 	if err != nil {
 		t.Skipf("docker unavailable: %v", err)
@@ -45,22 +44,18 @@ func TestDockerDistributedDKG(t *testing.T) {
 		t.Skipf("docker daemon not healthy: %v", err)
 	}
 
-	// Fixture: N host keypairs + identifiers, assembled into the shared descriptor.
-	hostSecrets := make([]string, numParts)
-	d := SessionDescriptor{Threshold: threshold}
-	for i := 0; i < numParts; i++ {
-		id, err := core.IdentifierFromUint16(uint16(i + 1))
-		require.NoError(t, err)
+	// Leader key: the test holds it, so followers can pin the leader's host key
+	// directly (LEADER_PUB) without scraping it from logs.
+	leaderSk, err := secp.GeneratePrivateKey()
+	require.NoError(t, err)
+	leaderHostpub := hex.EncodeToString(leaderSk.PubKey().SerializeCompressed())
+
+	followerSecrets := make([]string, numFollowers)
+	for i := range followerSecrets {
 		sk, err := secp.GeneratePrivateKey()
 		require.NoError(t, err)
-		hostSecrets[i] = hex.EncodeToString(sk.Serialize())
-		d.Participants = append(d.Participants, ParticipantDescriptor{
-			ID:         hex.EncodeToString(id.Serialize()),
-			HostPubkey: hex.EncodeToString(sk.PubKey().SerializeCompressed()),
-		})
+		followerSecrets[i] = hex.EncodeToString(sk.Serialize())
 	}
-	sessionJSON, err := d.Marshal()
-	require.NoError(t, err)
 
 	buildImage(ctx, t)
 
@@ -68,75 +63,71 @@ func TestDockerDistributedDKG(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = net.Remove(context.Background()) })
 
-	// Coordinator: announce readiness via the COORD-LISTENING log before
-	// participants dial it (grpc clients connect lazily, so ordering is enough).
-	coord, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+	// Leader: announce readiness via LEADER-LISTENING before followers dial it (gRPC
+	// clients connect lazily, so ordering is enough).
+	leader, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:          dkgImage,
 			Networks:       []string{net.Name},
-			NetworkAliases: map[string][]string{net.Name: {"coordinator"}},
+			NetworkAliases: map[string][]string{net.Name: {"leader"}},
 			Env: map[string]string{
-				"ROLE":        "coordinator",
+				"ROLE":        "leader",
+				"HOST_SECRET": hex.EncodeToString(leaderSk.Serialize()),
 				"LISTEN_ADDR": ":" + relayPort,
-				"SESSION":     sessionJSON,
 			},
-			WaitingFor: wait.ForLog("COORD-LISTENING").WithStartupTimeout(60 * time.Second),
+			WaitingFor: wait.ForLog("LEADER-LISTENING").WithStartupTimeout(60 * time.Second),
 		},
 		Started: true,
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = coord.Terminate(context.Background()) })
+	t.Cleanup(func() { _ = leader.Terminate(context.Background()) })
 
-	// Launch all participants first; the ceremony needs all N present, so waiting
-	// on one before starting the rest would deadlock.
-	parts := make([]testcontainers.Container, numParts)
-	for i := 0; i < numParts; i++ {
+	// Followers join dynamically; the leader re-DKGs on each join.
+	followers := make([]testcontainers.Container, numFollowers)
+	for i := 0; i < numFollowers; i++ {
 		c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 			ContainerRequest: testcontainers.ContainerRequest{
 				Image:    dkgImage,
 				Networks: []string{net.Name},
 				Env: map[string]string{
-					"ROLE":        "participant",
-					"COORD_ADDR":  "coordinator:" + relayPort,
-					"HOST_SECRET": hostSecrets[i],
-					"SESSION":     sessionJSON,
+					"ROLE":        "follower",
+					"COORD_ADDR":  "leader:" + relayPort,
+					"HOST_SECRET": followerSecrets[i],
+					"LEADER_PUB":  leaderHostpub,
 				},
 			},
 			Started: true,
 		})
-		require.NoErrorf(t, err, "start participant %d", i)
-		parts[i] = c
+		require.NoErrorf(t, err, "start follower %d", i)
+		followers[i] = c
 		t.Cleanup(func() { _ = c.Terminate(context.Background()) })
 	}
 
-	// Now wait for each participant to reach DKG-OK.
-	for i, c := range parts {
-		err := wait.ForLog("DKG-OK").WithStartupTimeout(90 * time.Second).WaitUntilReady(ctx, c)
-		require.NoErrorf(t, err, "participant %d did not reach DKG-OK", i)
+	// Each follower reaches DKG-OK once it holds a share of the group key.
+	for i, c := range followers {
+		err := wait.ForLog("DKG-OK").WithStartupTimeout(120 * time.Second).WaitUntilReady(ctx, c)
+		require.NoErrorf(t, err, "follower %d did not reach DKG-OK", i)
 	}
 
-	// Every participant must report the same compressed group key.
+	// Every follower must report the same compressed group key (a0 is fixed, so the
+	// key is stable regardless of join order or committee size).
 	re := regexp.MustCompile(`RESULT=([0-9a-fA-F]{66})`)
 	var groupKey string
-	for i, c := range parts {
+	for i, c := range followers {
 		vk := extractResult(ctx, t, c, re)
-		require.Truef(t, vk[:2] == "02" || vk[:2] == "03", "participant %d VK not a compressed pubkey: %s", i, vk)
+		require.Truef(t, vk[:2] == "02" || vk[:2] == "03", "follower %d VK not a compressed pubkey: %s", i, vk)
 		if i == 0 {
 			groupKey = vk
 			continue
 		}
-		require.Equalf(t, groupKey, vk, "participant %d disagrees on the group key", i)
+		require.Equalf(t, groupKey, vk, "follower %d disagrees on the group key", i)
 	}
 
-	// Coordinator drove the ceremony to completion.
-	err = wait.ForLog("COORD-OK").WithStartupTimeout(30 * time.Second).WaitUntilReady(ctx, coord)
-	require.NoError(t, err, "coordinator did not reach COORD-OK")
-
-	t.Logf("distributed DKG over %d containers succeeded; group key %s", numParts+1, groupKey)
+	t.Logf("leader/follower DKG over %d containers succeeded; group key %s", numFollowers+1, groupKey)
 }
 
-// buildImage compiles the dkgnode harness as a static linux binary and bakes it
-// into a scratch image (built once, reused by every container).
+// buildImage compiles the dkgnode harness as a static linux binary and bakes it into
+// a scratch image (built once, reused by every container).
 func buildImage(ctx context.Context, t *testing.T) {
 	t.Helper()
 
@@ -155,8 +146,6 @@ func buildImage(ctx context.Context, t *testing.T) {
 	dockerfile := "FROM scratch\nCOPY dkgnode /dkgnode\nENTRYPOINT [\"/dkgnode\"]\n"
 	require.NoError(t, os.WriteFile(filepath.Join(tmp, "Dockerfile"), []byte(dockerfile), 0o644))
 
-	// Started:false builds the image (and creates an unstarted container we drop);
-	// KeepImage keeps the tag for the real containers to reference by Image name.
 	bc, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			FromDockerfile: testcontainers.FromDockerfile{

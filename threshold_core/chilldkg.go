@@ -35,6 +35,15 @@ var ErrInvalidRecoveryData = errors.New("invalid recovery data")
 // ErrInvalidRandomness is returned when the supplied randomness is not 32 bytes.
 var ErrInvalidRandomness = errors.New("randomness must be 32 bytes")
 
+// ErrLeaderZeroSecret is returned in a leader/slave session when the leader's
+// commitment-to-secret is the identity element (the leader must contribute a secret).
+var ErrLeaderZeroSecret = errors.New("leader contributed no secret")
+
+// ErrSlaveNonZeroSecret is returned in a leader/slave session when a slave's
+// commitment-to-secret is not the identity element (slaves must contribute the
+// identity element, never a secret).
+var ErrSlaveNonZeroSecret = errors.New("slave contributed a secret")
+
 // secp256k1 serialization sizes, in bytes.
 const (
 	compressedPointLen = 33 // compressed secp256k1 point
@@ -177,6 +186,16 @@ func (p SessionParams) Validate() error {
 		return ErrInvalidSessionParams
 	}
 	return nil
+}
+
+// isLeaderID reports whether id is the designated leader of a leader/slave session.
+// leader == nil means a classic egalitarian session (no leader), so it returns false
+// for everyone. Leadership is an SDK-level configuration passed explicitly into the
+// BIP step functions; it is deliberately NOT part of SessionParams or the params_id,
+// so a leader/slave session uses the exact same (BIP-compatible) params as a classic
+// one over the same members.
+func isLeaderID(id Identifier, leader *Identifier) bool {
+	return leader != nil && id.Equal(*leader)
 }
 
 // DKGOutput is the per-participant result of a successful session.
@@ -454,7 +473,13 @@ func bipVSSSecshares(coeffs []secp.ModNScalar, n int) ([]secp.ModNScalar, error)
 
 // BIPParticipantStep1 is chilldkg.participant_step1: the deterministic EncPedPop
 // round-1 message com(33·t) ‖ pop(64) ‖ pubnonce(33) ‖ enc_shares(32·n).
-func (p SessionParams) BIPParticipantStep1(hostseckey, random []byte) ([]byte, error) {
+//
+// leader (an SDK-level config, not part of SessionParams) selects the leader/slave
+// mode: nil => classic egalitarian session, byte-identical to the BIP spec. When
+// non-nil, the caller whose identifier equals *leader is the leader and supplies the
+// fixed, membership-independent constant term a0 via leaderSecret; every other caller
+// is a slave (a0 = identity, no proof-of-possession) and passes leaderSecret = nil.
+func (p SessionParams) BIPParticipantStep1(hostseckey, random, leaderSecret []byte, leader *Identifier) ([]byte, error) {
 	hostSk, err := parseBIPHostSeckey(hostseckey)
 	if err != nil {
 		return nil, err
@@ -490,6 +515,23 @@ func (p SessionParams) BIPParticipantStep1(hostseckey, random []byte) ([]byte, e
 
 	// SimplPedPop: derive coeffs from the seed, then commit + share.
 	coeffs := bipVSSGenerate(simplSeed[:], t)
+
+	// Role assignment (leader/slave sessions only; no-op when leader == nil). The
+	// leader overrides its constant term with the fixed leaderSecret so the group key
+	// is stable across re-DKGs; a slave contributes the identity element (a0 = 0). The
+	// non-constant coeffs stay seed-derived (randomization) for every role.
+	self := p.IDs()[idx]
+	slave := leader != nil && !isLeaderID(self, leader)
+	if isLeaderID(self, leader) {
+		var a0 secp.ModNScalar
+		if overflow := a0.SetByteSlice(leaderSecret); len(leaderSecret) != scalarLen || overflow || a0.IsZero() {
+			return nil, ErrLeaderZeroSecret
+		}
+		coeffs[0] = a0
+	} else if slave {
+		coeffs[0] = modNZero()
+	}
+
 	_, commitPts, err := generateSecretPolynomial(&coeffs[0], uint16(n), uint16(t), coeffs[1:])
 	if err != nil {
 		return nil, err
@@ -503,11 +545,18 @@ func (p SessionParams) BIPParticipantStep1(hostseckey, random []byte) ([]byte, e
 		return nil, err
 	}
 
-	// Proof-of-possession over idx, signed with the VSS secret a0.
-	a0 := coeffs[0].Bytes()
-	pop, err := bipSchnorrSign(be32(uint32(idx)), a0[:], simplAux[:], bipTag+labelPopMessage)
-	if err != nil {
-		return nil, err
+	// Proof-of-possession over idx, signed with the VSS secret a0. A slave has no
+	// secret (a0 = identity, which bipSchnorrSign would reject), so it carries a zero
+	// placeholder that the role-aware verifier in step2 skips.
+	var pop []byte
+	if slave {
+		pop = make([]byte, schnorrSigLen)
+	} else {
+		a0 := coeffs[0].Bytes()
+		pop, err = bipSchnorrSign(be32(uint32(idx)), a0[:], simplAux[:], bipTag+labelPopMessage)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// EncPedPop encrypt the shares (deckey = host secret).
@@ -529,14 +578,22 @@ func (p SessionParams) BIPParticipantStep1(hostseckey, random []byte) ([]byte, e
 }
 
 // parseBIPmsg1 splits a round-1 message: com(33·t) ‖ pop(64) ‖ pubnonce(33) ‖ enc_shares(32·n).
-func parseBIPmsg1(b []byte, t, n int) (com VerifiableSecretSharingCommitment, pop, pubnonce []byte, encShares []secp.ModNScalar, err error) {
+func parseBIPmsg1(b []byte, t, n int, allowIdentitySecret bool) (com VerifiableSecretSharingCommitment, pop, pubnonce []byte, encShares []secp.ModNScalar, err error) {
 	if len(b) != compressedPointLen*t+schnorrSigLen+compressedPointLen+scalarLen*n {
 		return VerifiableSecretSharingCommitment{}, nil, nil, nil, ErrIncorrectPackage
 	}
 	off := 0
 	coeffs := make([]CoefficientCommitment, t)
 	for i := 0; i < t; i++ {
-		pt, derr := elemDeserializeCompressed(b[off : off+compressedPointLen])
+		// In a leader/slave session a slave's commitment-to-secret (coeffs[0]) is the
+		// identity element; every other coefficient is a normal point.
+		var pt secp.JacobianPoint
+		var derr error
+		if i == 0 && allowIdentitySecret {
+			pt, derr = decodePointWithInfinity(b[off : off+compressedPointLen])
+		} else {
+			pt, derr = elemDeserializeCompressed(b[off : off+compressedPointLen])
+		}
 		if derr != nil {
 			return VerifiableSecretSharingCommitment{}, nil, nil, nil, derr
 		}
@@ -568,25 +625,38 @@ func cmsg1Len(t, n int) int {
 // BIPCoordinatorStep1 is chilldkg.coordinator_step1: it aggregates the round-1
 // messages into cmsg1 = coms_to_secrets(33·n) ‖ sum_coms_nonconst(33·(t-1)) ‖
 // pops(64·n) ‖ pubnonces(33·n) ‖ enc_secshares(32·n).
-func (p SessionParams) BIPCoordinatorStep1(pmsgs [][]byte) ([]byte, error) {
+func (p SessionParams) BIPCoordinatorStep1(pmsgs [][]byte, leader *Identifier) ([]byte, error) {
 	t, n := int(p.T), len(pmsgs)
 	if n != int(p.N) {
 		return nil, ErrIncorrectNumberOfPackages
 	}
 
+	ids := p.IDs()
 	comsToSecrets := make([][]byte, n)
 	pops := make([][]byte, n)
 	pubnonces := make([][]byte, n)
 	commits := make([]*VerifiableSecretSharingCommitment, n)
 	encShares := make([][]secp.ModNScalar, n)
 	for i, pm := range pmsgs {
-		com, pop, pubnonce, enc, err := parseBIPmsg1(pm, t, n)
+		slave := leader != nil && !isLeaderID(ids[i], leader)
+		com, pop, pubnonce, enc, err := parseBIPmsg1(pm, t, n, slave)
 		if err != nil {
 			return nil, &BIPFaultyParticipantError{Participant: i, Reason: "invalid participant message"}
 		}
+		// Leader/slave admission: the leader must contribute a secret (non-identity
+		// commitment-to-secret); every slave must contribute the identity element.
+		if leader != nil {
+			zero := isInfinity(com.Coeffs[0])
+			if isLeaderID(ids[i], leader) && zero {
+				return nil, fmt.Errorf("participant %d: %w", i, ErrLeaderZeroSecret)
+			}
+			if slave && !zero {
+				return nil, fmt.Errorf("participant %d: %w", i, ErrSlaveNonZeroSecret)
+			}
+		}
 		c := com
 		commits[i] = &c
-		cb, err := elemSerializeCompressed(com.Coeffs[0])
+		cb, err := encodePointWithInfinity(com.Coeffs[0])
 		if err != nil {
 			return nil, err
 		}
@@ -615,7 +685,7 @@ func (p SessionParams) BIPCoordinatorStep1(pmsgs [][]byte) ([]byte, error) {
 		out = append(out, comsToSecrets[i]...)
 	}
 	for j := 1; j < t; j++ {
-		b, err := elemSerializeCompressed(group.Coeffs[j])
+		b, err := encodePointWithInfinity(group.Coeffs[j])
 		if err != nil {
 			return nil, err
 		}
@@ -702,6 +772,17 @@ func decodePointWithInfinity(b []byte) (secp.JacobianPoint, error) {
 	return elemDeserializeCompressed(b)
 }
 
+// encodePointWithInfinity is the inverse of decodePointWithInfinity: the point at
+// infinity (identity element) serializes to compressedPointLen zero bytes, any
+// other point to its normal compressed encoding. Non-identity points are byte-
+// identical to elemSerializeCompressed, so this is safe to use everywhere.
+func encodePointWithInfinity(pt secp.JacobianPoint) ([]byte, error) {
+	if isInfinity(pt) {
+		return make([]byte, compressedPointLen), nil
+	}
+	return elemSerializeCompressed(pt)
+}
+
 // certeqMessage is the message signed in CertEq: a 33-byte zero-padded domain
 // prefix ‖ idx(4B) ‖ x (BIP DKG certeq_message).
 func certeqMessage(x []byte, idx uint32) []byte {
@@ -739,8 +820,11 @@ func bipEqInput(t int, sumComs VerifiableSecretSharingCommitment, enckeys, pubno
 // BIPParticipantStep2 is chilldkg.participant_step2: from cmsg1 it verifies the
 // other participants and the caller's own share, then returns pmsg2 (the caller's
 // CertEq signature over eq_input). random is the same value used in step1 (needed
-// to re-derive the caller's own commitment for the echo check).
-func (p SessionParams) BIPParticipantStep2(hostseckey, random, cmsg1, auxRand []byte) ([]byte, error) {
+// to re-derive the caller's own commitment for the echo check in a classic session).
+// leader/leaderSecret mirror BIPParticipantStep1: leader == nil is a classic session;
+// otherwise the caller whose identifier is *leader is the leader (re-deriving its echo
+// from leaderSecret), and every other caller is a slave (echoes the identity element).
+func (p SessionParams) BIPParticipantStep2(hostseckey, random, cmsg1, auxRand, leaderSecret []byte, leader *Identifier) ([]byte, error) {
 	hostSk, err := parseBIPHostSeckey(hostseckey)
 	if err != nil {
 		return nil, err
@@ -768,18 +852,41 @@ func (p SessionParams) BIPParticipantStep2(hostseckey, random, cmsg1, auxRand []
 		return nil, err
 	}
 
-	// The coordinator must echo the caller's own commitment-to-secret unchanged.
-	encCtx := encContextBytes(uint32(t), enckeys)
-	simplSeed := bipHash(labelEncpedpopSeed, hostSk.Serialize(), random, encCtx)
-	myComToSecret := elemBaseMul(&bipVSSGenerate(simplSeed[:], uint32(t))[0])
-	if !pointEqual(comsToSecrets[idx], myComToSecret) {
-		return nil, &BIPFaultyCoordinatorError{Reason: "coordinator echoed the wrong commitment-to-secret"}
+	// The coordinator must echo the caller's own commitment-to-secret unchanged. The
+	// expected value depends on role: the leader's fixed g^leaderSecret, a slave's
+	// identity element, or (classic) the seed-derived g^a0.
+	ids := p.IDs()
+	self := ids[idx]
+	switch {
+	case isLeaderID(self, leader):
+		var a0 secp.ModNScalar
+		if overflow := a0.SetByteSlice(leaderSecret); len(leaderSecret) != scalarLen || overflow || a0.IsZero() {
+			return nil, ErrLeaderZeroSecret
+		}
+		if !pointEqual(comsToSecrets[idx], elemBaseMul(&a0)) {
+			return nil, &BIPFaultyCoordinatorError{Reason: "coordinator echoed the wrong commitment-to-secret"}
+		}
+	case leader != nil: // slave: must echo the identity element
+		if !isInfinity(comsToSecrets[idx]) {
+			return nil, &BIPFaultyCoordinatorError{Reason: "coordinator echoed the wrong commitment-to-secret"}
+		}
+	default: // classic
+		encCtx := encContextBytes(uint32(t), enckeys)
+		simplSeed := bipHash(labelEncpedpopSeed, hostSk.Serialize(), random, encCtx)
+		if !pointEqual(comsToSecrets[idx], elemBaseMul(&bipVSSGenerate(simplSeed[:], uint32(t))[0])) {
+			return nil, &BIPFaultyCoordinatorError{Reason: "coordinator echoed the wrong commitment-to-secret"}
+		}
 	}
 
 	// Verify every other participant's commitment-to-secret and proof-of-possession.
+	// In a leader/slave session, slave peers contribute the identity element with no
+	// proof-of-possession and are skipped; the leader peer is verified normally.
 	for i := 0; i < n; i++ {
 		if i == idx {
 			continue
+		}
+		if leader != nil && !isLeaderID(ids[i], leader) {
+			continue // slave peer: identity commitment, no pop
 		}
 		if isInfinity(comsToSecrets[i]) {
 			return nil, &BIPFaultyParticipantOrCoordinatorError{Participant: i, Reason: "Participant sent invalid commitment"}
@@ -1236,15 +1343,17 @@ func pointEqual(a, b secp.JacobianPoint) bool { return a.EquivalentNonConst(&b) 
 
 // BIPCoordinatorInvestigate is chilldkg.coordinator_investigate: per recipient i, the
 // per-sender enc_partial_secshares(32·n) ‖ partial_pubshares(33·n) (sender j's com at i+1).
-func (p SessionParams) BIPCoordinatorInvestigate(pmsgs [][]byte) ([][]byte, error) {
+func (p SessionParams) BIPCoordinatorInvestigate(pmsgs [][]byte, leader *Identifier) ([][]byte, error) {
 	t, n := int(p.T), len(pmsgs)
 	if n != int(p.N) {
 		return nil, ErrIncorrectNumberOfPackages
 	}
+	ids := p.IDs()
 	coms := make([]VerifiableSecretSharingCommitment, n)
 	encShares := make([][]secp.ModNScalar, n)
 	for j, pm := range pmsgs {
-		com, _, _, enc, err := parseBIPmsg1(pm, t, n)
+		slave := leader != nil && !isLeaderID(ids[j], leader)
+		com, _, _, enc, err := parseBIPmsg1(pm, t, n, slave)
 		if err != nil {
 			return nil, err
 		}
