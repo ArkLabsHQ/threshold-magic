@@ -16,15 +16,17 @@ import (
 // leaderIDValue is the leader's fixed identifier; joiners get ids above it.
 const leaderIDValue = 1
 
-// Leader is the custodial owner of a leader/follower threshold key. It runs the gRPC
-// relay (coordinator) AND participates, contributing the secret a0; every other
-// party (a Follower) contributes the identity element. a0 is generated once and
-// persisted, so the aggregate public key is stable across re-DKGs as members join or
-// are banned. The committee starts as just the leader and grows dynamically via the
-// Join RPC; the first DKG runs once a second member joins.
+// Leader is the custodial owner of one or more leader/follower threshold keys. It
+// runs the gRPC relay (coordinator) AND participates, contributing each key's
+// secret a0; every other party (a Follower) contributes the identity element. Each
+// secret is named by a label: a0 for a label is generated once and persisted, so
+// that label's aggregate public key is stable across re-DKGs as members join or are
+// banned. The committee starts as just the leader and grows via the Join RPC; a
+// label's DKG runs when a follower requests a reshare for it (RequestReshare) and
+// the committee has at least two members.
 //
-// Trust model: custodial. The leader knows the full group secret; followers only hold
-// threshold shares of it and never learn or contribute to it.
+// Trust model: custodial. The leader knows every group secret; followers only hold
+// threshold shares of them and never learn or contribute to them.
 type Leader struct {
 	hostSk *secp.PrivateKey
 	self   core.Identifier
@@ -32,30 +34,59 @@ type Leader struct {
 	lis    net.Listener
 	srv    *Server
 
-	a0     []byte               // loaded once in Serve
-	events chan membershipEvent // join/ban events drained by Serve
+	events chan membershipEvent // join/ban/reshare events drained by Serve
+
+	// authorize, when non-nil, gates every Join: a host public key it rejects is
+	// refused admission even with a valid proof-of-possession.
+	authorize func(hostPubkey []byte) bool
 
 	mu        sync.Mutex
 	committee map[core.Identifier]*secp.PublicKey // current members (incl. the leader)
 	banned    map[string]bool                     // hex(hostpub) blocklist
 	nextID    uint16                              // next identifier to assign on join
-	epoch     uint64                              // monotonic re-DKG epoch
-	groupKey  []byte                              // stable group key once known
-	groupSize int                                 // member count of the last successful re-DKG
-	groupT    int                                 // signing threshold of the last successful re-DKG
+	epoch     uint64                              // monotonic re-DKG epoch (across all labels)
+	groups    map[string]*groupState               // label -> last successful re-DKG result
 }
 
-// membershipEvent is a pending committee change handled by the Serve loop.
+// groupState is the last successful re-DKG result for one label.
+type groupState struct {
+	key  []byte // stable group public key (33-byte compressed)
+	size int    // member count of the last successful re-DKG
+	t    int    // signing threshold of the last successful re-DKG
+}
+
+// eventKind classifies a pending Serve action.
+type eventKind int
+
+const (
+	evJoin    eventKind = iota // a new member joined (record it; no re-DKG yet)
+	evBan                      // a member was banned (re-DKG every known label)
+	evReshare                  // a follower asked to (re-)share a named label
+)
+
+// membershipEvent is a pending committee change or reshare handled by the Serve loop.
 type membershipEvent struct {
-	join bool
-	id   core.Identifier
-	pub  *secp.PublicKey // set for a join
+	kind  eventKind
+	id    core.Identifier
+	pub   *secp.PublicKey // set for a join
+	label string          // set for a reshare
+}
+
+// Option customizes a Leader at construction. Options are applied in order.
+type Option func(*Leader)
+
+// WithAuthorize installs an admission callback consulted on every Join, after the
+// proof-of-possession check and before an identifier is assigned. Returning false
+// refuses the join. Passing nil (or omitting the option) leaves the default: any
+// host key with a valid proof may join.
+func WithAuthorize(fn func(hostPubkey []byte) bool) Option {
+	return func(l *Leader) { l.authorize = fn }
 }
 
 // NewLeader binds a gRPC listener and prepares a leader whose committee initially
-// holds only itself. Followers join via the Join RPC (NewJoiningFollower); the first DKG
-// runs once the committee reaches two. Use a ":0" port and read it back with Addr.
-func NewLeader(hostSk *secp.PrivateKey, listenAddr string, store Store) (*Leader, error) {
+// holds only itself. Followers join via the Join RPC (NewJoiningFollower) and then
+// request per-label reshares. Use a ":0" port and read it back with Addr.
+func NewLeader(hostSk *secp.PrivateKey, listenAddr string, store Store, opts ...Option) (*Leader, error) {
 	if hostSk == nil {
 		return nil, errors.New("thresholdsdk: nil host key")
 	}
@@ -72,7 +103,7 @@ func NewLeader(hostSk *secp.PrivateKey, listenAddr string, store Store) (*Leader
 	}
 	srv := newDynamicServer(lis)
 	srv.addSub(addr(self)) // the leader's own queue, for its loopback participant half
-	return &Leader{
+	l := &Leader{
 		hostSk:    hostSk,
 		self:      self,
 		store:     store,
@@ -82,58 +113,72 @@ func NewLeader(hostSk *secp.PrivateKey, listenAddr string, store Store) (*Leader
 		committee: map[core.Identifier]*secp.PublicKey{self: hostSk.PubKey()},
 		banned:    make(map[string]bool),
 		nextID:    leaderIDValue + 1,
-	}, nil
+		groups:    make(map[string]*groupState),
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(l)
+		}
+	}
+	return l, nil
 }
 
 // Addr is the resolved listen address; followers dial it.
 func (l *Leader) Addr() net.Addr { return l.lis.Addr() }
 
-// Pub is the leader's host public key — followers pin it to verify the leader's signed
+// HostPubKey is the leader's host public key — followers pin it to verify the leader's signed
 // commands. (Convenience for wiring tests/clients.)
-func (l *Leader) Pub() *secp.PublicKey { return l.hostSk.PubKey() }
+func (l *Leader) HostPubKey() *secp.PublicKey { return l.hostSk.PubKey() }
 
-// Pubkey is the stable group public key (33-byte compressed), available after the
-// first successful DKG.
-func (l *Leader) Pubkey() ([]byte, error) {
+// GroupPubKey is the stable group public key (33-byte compressed) for a label, available
+// after that label's first successful DKG.
+func (l *Leader) GroupPubKey(label string) ([]byte, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.groupKey == nil {
-		return nil, errors.New("thresholdsdk: no key yet (needs a member to join)")
+	g := l.groups[label]
+	if g == nil || g.key == nil {
+		return nil, errors.New("thresholdsdk: no key yet for label (needs a member to reshare)")
 	}
-	return l.groupKey, nil
+	return g.key, nil
 }
 
-// GroupSize is the member count of the most recent successful re-DKG (0 before any).
-// It lets a caller wait for the group to reach a target size.
-func (l *Leader) GroupSize() int {
+// GroupSize is the member count of label's most recent successful re-DKG (0 before any).
+func (l *Leader) GroupSize(label string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.groupSize
+	if g := l.groups[label]; g != nil {
+		return g.size
+	}
+	return 0
 }
 
-// Threshold is the signing threshold (MajorityPolicy of the member count) of the most
-// recent successful re-DKG; 0 before any.
-func (l *Leader) Threshold() int {
+// Threshold is the signing threshold of label's most recent successful re-DKG (0 before any).
+func (l *Leader) Threshold(label string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.groupT
+	if g := l.groups[label]; g != nil {
+		return g.t
+	}
+	return 0
 }
 
-// secret loads the leader's persisted a0, generating and persisting a fresh one on
-// first use. a0 is membership-independent, which is what keeps the group key stable.
-func (l *Leader) secret() ([]byte, error) {
-	if a0, err := l.store.GetLeaderSecret(); err == nil {
+// secretFor loads a label's persisted a0, generating and persisting a fresh one on
+// first use. a0 is membership-independent, which keeps a label's group key stable.
+func (l *Leader) secretFor(label string) ([]byte, error) {
+	a0, err := l.store.GetLeaderSecret(label)
+	if err == nil {
 		return a0, nil
-	} else if !errors.Is(err, ErrNotFound) {
+	}
+	if !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
-	k, err := secp.GeneratePrivateKey()
-	if err != nil {
-		return nil, err
+	k, gerr := secp.GeneratePrivateKey()
+	if gerr != nil {
+		return nil, gerr
 	}
-	a0 := k.Serialize()
-	if err := l.store.PutLeaderSecret(a0); err != nil {
-		return nil, err
+	a0 = k.Serialize()
+	if perr := l.store.PutLeaderSecret(label, a0); perr != nil {
+		return nil, perr
 	}
 	return a0, nil
 }
@@ -152,47 +197,79 @@ const rekeyTimeout = 8 * time.Second
 // members (the minimum for a threshold key).
 var ErrTooFewMembers = errors.New("thresholdsdk: too few members for a threshold key")
 
-// Serve runs the leader as a long-lived daemon: it serves the relay, runs the
-// initial DKG over the seed committee, then re-DKGs on every membership change —
-// joins (via the Join RPC) and bans (via Ban) — reusing a0 so the group public key
-// never moves. It blocks until ctx is done.
+// Serve runs the leader as a long-lived daemon: it serves the relay, records joins,
+// bans, and follower reshare requests, and runs a per-label
 func (l *Leader) Serve(ctx context.Context) error {
-	a0, err := l.secret()
-	if err != nil {
-		return err
-	}
-	l.a0 = a0
 	l.srv.onJoin = l.handleJoin
 	l.srv.Start()
+	go l.drainReshareReqs(ctx)
 
-	// No DKG until a second member joins; each join/ban then drives a re-DKG.
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case ev := <-l.events:
-			if !ev.join { // ban: tell the member to stop and drop it before re-DKG
-				l.notifyRemoved(ctx, ev.id)
-			}
-			l.applyEvent(ev)
-			if err := l.rekey(ctx); err != nil {
-				if ctx.Err() != nil {
-					return ctx.Err()
+			switch ev.kind {
+			case evJoin:
+				l.applyJoin(ev)
+			case evReshare:
+				if err := l.rekey(ctx, ev.label); err != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					return err
 				}
-				return err
+			case evBan:
+				l.notifyRemoved(ctx, ev.id)
+				l.applyBan(ev)
+				if err := l.rekeyAll(ctx); err != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					return err
+				}
 			}
 		}
 	}
 }
 
-func (l *Leader) applyEvent(ev membershipEvent) {
+// drainReshareReqs converts follower reshare requests (relay Sends to ReshareAddr)
+// into evReshare events. The requester must be a current committee member.
+func (l *Leader) drainReshareReqs(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case m := <-l.srv.ReshareReqs():
+			id, err := idOf(m.From)
+			if err != nil {
+				continue
+			}
+			l.mu.Lock()
+			_, member := l.committee[id]
+			l.mu.Unlock()
+			if !member {
+				continue // only admitted members may drive a reshare
+			}
+			select {
+			case l.events <- membershipEvent{kind: evReshare, id: id, label: string(m.Payload)}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+}
+
+func (l *Leader) applyJoin(ev membershipEvent) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if ev.join {
-		l.committee[ev.id] = ev.pub
-	} else {
-		delete(l.committee, ev.id)
-	}
+	l.committee[ev.id] = ev.pub
+}
+
+func (l *Leader) applyBan(ev membershipEvent) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.committee, ev.id)
 }
 
 func (l *Leader) committeeSnapshot() map[core.Identifier]*secp.PublicKey {
@@ -215,34 +292,57 @@ func (l *Leader) notifyRemoved(ctx context.Context, id core.Identifier) {
 	l.srv.removeSub(addrOf(id))
 }
 
-// rekey runs a re-DKG, evicting non-responders and retrying until it succeeds over a
-// fully-responsive committee (or too few members remain).
-func (l *Leader) rekey(ctx context.Context) error {
+// rekeyAll re-shares every label the leader has produced a group for. Used after a
+// ban so no evicted member retains a share of any secret.
+func (l *Leader) rekeyAll(ctx context.Context) error {
+	l.mu.Lock()
+	labels := make([]string, 0, len(l.groups))
+	for lbl := range l.groups {
+		labels = append(labels, lbl)
+	}
+	l.mu.Unlock()
+	for _, lbl := range labels {
+		if err := l.rekey(ctx, lbl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// rekey runs a re-DKG for one label, evicting non-responders and retrying until it
+// succeeds over a fully-responsive committee. It is a no-op while fewer than two
+// members are present (the secret stays leader-only until a follower reshares).
+func (l *Leader) rekey(ctx context.Context, label string) error {
+	a0, err := l.secretFor(label)
+	if err != nil {
+		return err
+	}
 	for {
 		committee := l.committeeSnapshot()
 		if len(committee) < 2 {
-			return ErrTooFewMembers
+			return nil
 		}
 		l.mu.Lock()
 		l.epoch++
 		epoch := l.epoch
 		l.mu.Unlock()
 
-		out, rec, nonResp, err := l.attempt(ctx, committee, epoch)
+		out, rec, nonResp, err := l.attempt(ctx, label, a0, committee, epoch)
 		if err != nil {
 			return err
 		}
 		if len(nonResp) == 0 {
-			if l.groupKey != nil && !bytes.Equal(out.ThresholdPubkey, l.groupKey) {
+			l.mu.Lock()
+			prev := l.groups[label]
+			l.mu.Unlock()
+			if prev != nil && prev.key != nil && !bytes.Equal(out.ThresholdPubkey, prev.key) {
 				return errors.New("thresholdsdk: group key drifted across re-DKG")
 			}
 			if err := l.store.PutRecovery(out.ThresholdPubkey, rec); err != nil {
 				return err
 			}
 			l.mu.Lock()
-			l.groupKey = out.ThresholdPubkey
-			l.groupSize = len(committee)
-			l.groupT = int(MajorityPolicy(len(committee)))
+			l.groups[label] = &groupState{key: out.ThresholdPubkey, size: len(committee), t: int(MajorityPolicy(len(committee)))}
 			l.mu.Unlock()
 			return nil
 		}
@@ -259,10 +359,10 @@ func (l *Leader) rekey(ctx context.Context) error {
 	}
 }
 
-// attempt runs one bounded re-DKG over committee at epoch. It returns the leader's
-// output + recovery on full success, or the members that failed to contribute round
-// 1 (resp. round 2) in time, for the caller to evict and retry.
-func (l *Leader) attempt(ctx context.Context, committee map[core.Identifier]*secp.PublicKey, epoch uint64) (core.BIPDKGOutput, []byte, []core.Identifier, error) {
+// attempt runs one bounded re-DKG for label over committee at epoch, using a0 as the
+// leader's secret. It returns the leader's output + recovery on full success, or the
+// members that failed to contribute a round in time, for the caller to evict and retry.
+func (l *Leader) attempt(ctx context.Context, label string, a0 []byte, committee map[core.Identifier]*secp.PublicKey, epoch uint64) (core.BIPDKGOutput, []byte, []core.Identifier, error) {
 	t := MajorityPolicy(len(committee))
 	params, err := core.NewSessionParams(t, committee)
 	if err != nil {
@@ -275,7 +375,7 @@ func (l *Leader) attempt(ctx context.Context, committee map[core.Identifier]*sec
 		l.srv.addSub(addrOf(id))
 	}
 
-	signed, err := signCommand(l.hostSk, rekeyCommand(epoch, t, l.self, committee))
+	signed, err := signCommand(l.hostSk, rekeyCommand(label, epoch, t, l.self, committee))
 	if err != nil {
 		return core.BIPDKGOutput{}, nil, nil, err
 	}
@@ -295,7 +395,7 @@ func (l *Leader) attempt(ctx context.Context, committee map[core.Identifier]*sec
 	go func() {
 		dp := &participant{
 			Params: params, Self: l.self, HostSk: l.hostSk, Rng: rand.Reader,
-			Transport: newLoopback(l.srv, l.self), Leader: &l.self, LeaderSecret: l.a0,
+			Transport: newLoopback(l.srv, l.self), Leader: &l.self, LeaderSecret: a0,
 		}
 		o, r, e := dp.Run(pctx)
 		pdone <- pres{o, r, e}
@@ -337,6 +437,7 @@ func (l *Leader) attempt(ctx context.Context, committee map[core.Identifier]*sec
 	if pr.err != nil {
 		return core.BIPDKGOutput{}, nil, nil, pr.err
 	}
+	pr.out.Label = label
 	return pr.out, pr.rec, nil, nil
 }
 
@@ -375,7 +476,7 @@ func (l *Leader) collect(ctx context.Context, ids []core.Identifier, index map[c
 
 // handleJoin (the Server.onJoin callback) admits a new party: verify its proof,
 // reject banned/duplicate keys, assign an identifier, create its queue, and enqueue
-// a join event for the Serve loop to re-DKG.
+// a join event. The member receives shares once it (or another) requests a reshare.
 func (l *Leader) handleJoin(hostPubkey, proof []byte) (core.Identifier, error) {
 	pub, err := secp.ParsePubKey(hostPubkey)
 	if err != nil {
@@ -383,6 +484,9 @@ func (l *Leader) handleJoin(hostPubkey, proof []byte) (core.Identifier, error) {
 	}
 	if !verifyJoinProof(pub, proof) {
 		return core.Identifier{}, errors.New("invalid join proof")
+	}
+	if l.authorize != nil && !l.authorize(hostPubkey) {
+		return core.Identifier{}, errors.New("host key not authorized")
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -397,7 +501,7 @@ func (l *Leader) handleJoin(hostPubkey, proof []byte) (core.Identifier, error) {
 	id := l.assignIDLocked()
 	l.srv.addSub(addrOf(id))
 	select {
-	case l.events <- membershipEvent{join: true, id: id, pub: pub}:
+	case l.events <- membershipEvent{kind: evJoin, id: id, pub: pub}:
 		return id, nil
 	default:
 		return core.Identifier{}, errors.New("join queue full")
@@ -419,7 +523,7 @@ func (l *Leader) assignIDLocked() core.Identifier {
 	}
 }
 
-// Ban blocklists a member's host key and triggers a re-DKG over the remaining
+// Ban blocklists a member's host key and re-shares every label over the remaining
 // committee. The banned member is told to stop. Banning the leader is refused.
 func (l *Leader) Ban(ctx context.Context, hostPubkey []byte) error {
 	l.mu.Lock()
@@ -440,7 +544,7 @@ func (l *Leader) Ban(ctx context.Context, hostPubkey []byte) error {
 		return errors.New("thresholdsdk: leader cannot ban itself")
 	}
 	select {
-	case l.events <- membershipEvent{join: false, id: target}:
+	case l.events <- membershipEvent{kind: evBan, id: target}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

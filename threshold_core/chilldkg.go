@@ -930,6 +930,30 @@ type BIPDKGOutput struct {
 	ThresholdPubkey []byte   // 33-byte compressed
 	Secshare        []byte   // 32-byte big-endian; nil for the coordinator
 	Pubshares       [][]byte // n × 33-byte compressed
+	Label           string   // caller-assigned label of the secret this share belongs to
+}
+
+// LeaderGroupPubkey computes the taproot-tweaked group public key g^(a0+tweak),
+// tweak = H_TapTweak(g^a0), for a leader whose fixed secret is a0 = leaderSecret
+// (33-byte compressed). Because slaves contribute the identity element, this is the
+// membership-independent group key the ChillDKG ceremony produces — so a leader can
+// publish its group key from a0 alone, without waiting for a member to join.
+// leaderSecret must be a 32-byte, in-range, non-zero scalar (same rule as
+// BIPParticipantStep1).
+func LeaderGroupPubkey(leaderSecret []byte) ([]byte, error) {
+	var a0 secp.ModNScalar
+	if overflow := a0.SetByteSlice(leaderSecret); len(leaderSecret) != scalarLen || overflow || a0.IsZero() {
+		return nil, fmt.Errorf("thresholdcore: leader secret must be a 32-byte, in-range, non-zero scalar")
+	}
+	com := elemBaseMul(&a0)
+	pk, err := encodePointWithInfinity(com)
+	if err != nil {
+		return nil, err
+	}
+	tweakHash := taggedHash(tagTapTweak, pk)
+	tweak := modNFromBytesAllowZero(tweakHash[:])
+	tweaked := elemAdd(com, elemBaseMul(&tweak))
+	return elemSerializeCompressed(tweaked)
 }
 
 // bipSchnorrVerify is secp256k1lab.bip340.schnorr_verify with a custom tag prefix
@@ -986,8 +1010,8 @@ func bipTapTweak(sumComs VerifiableSecretSharingCommitment) (secp.ModNScalar, Ve
 	if err != nil {
 		return secp.ModNScalar{}, VerifiableSecretSharingCommitment{}, err
 	}
-	th := taggedHash(tagTapTweak, pk)
-	tweak := modNFromBytesAllowZero(th[:])
+	tweakHash := taggedHash(tagTapTweak, pk)
+	tweak := modNFromBytesAllowZero(tweakHash[:])
 	pubtweak := elemBaseMul(&tweak)
 	coeffs := make([]CoefficientCommitment, len(sumComs.Coeffs))
 	copy(coeffs, sumComs.Coeffs)

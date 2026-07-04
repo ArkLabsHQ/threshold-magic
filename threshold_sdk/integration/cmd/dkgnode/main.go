@@ -17,8 +17,10 @@ import (
 	"net/http"
 	"os"
 
-	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	sdk "thresholdsdk"
+	"thresholdsdk/badgerstore"
+
+	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
 func main() {
@@ -33,7 +35,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("HOST_SECRET: %w", err)
 	}
-	store, err := sdk.OpenBadgerStore("")
+	store, err := badgerstore.Open("")
 	if err != nil {
 		return err
 	}
@@ -102,10 +104,11 @@ func serveAdmin(ctx context.Context, l *sdk.Leader, addr string) {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		key, _ := l.Pubkey() // err (no key yet) -> empty key, reported as size 0
+		const label = "default"
+		key, _ := l.GroupPubKey(label) // err (no key yet) -> empty key, reported as size 0
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"size": l.GroupSize(),
-			"t":    l.Threshold(),
+			"size": l.GroupSize(label),
+			"t":    l.Threshold(label),
 			"key":  hex.EncodeToString(key),
 		})
 	})

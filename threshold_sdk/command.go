@@ -60,6 +60,7 @@ type leaderCmd struct {
 	Leader    string            `json:"leader,omitempty"`  // hex(identifier)
 	Members   map[string]string `json:"members,omitempty"` // hex(id) -> hex(hostpub)
 	Target    string            `json:"target,omitempty"`  // hex(id), for cmdRemoved
+	Label     string            `json:"label,omitempty"`   // secret label this rekey (re-)shares
 }
 
 // signedCmd is the wire payload: the command plus the leader's signature over its
@@ -119,13 +120,14 @@ func verifyCommand(payload []byte, leaderPub *secp.PublicKey) (leaderCmd, error)
 	return sc.Cmd, nil
 }
 
-// rekeyCommand builds an unsigned rekey command for a committee.
-func rekeyCommand(epoch uint64, t uint16, leader core.Identifier, committee map[core.Identifier]*secp.PublicKey) leaderCmd {
+// rekeyCommand builds an unsigned rekey command for a committee, tagged with the
+// label of the secret it (re-)shares.
+func rekeyCommand(label string, epoch uint64, t uint16, leader core.Identifier, committee map[core.Identifier]*secp.PublicKey) leaderCmd {
 	members := make(map[string]string, len(committee))
 	for id, pub := range committee {
 		members[addrOf(id)] = hex.EncodeToString(pub.SerializeCompressed())
 	}
-	return leaderCmd{Kind: cmdRekey, Epoch: epoch, Threshold: t, Leader: addrOf(leader), Members: members}
+	return leaderCmd{Kind: cmdRekey, Epoch: epoch, Threshold: t, Leader: addrOf(leader), Members: members, Label: label}
 }
 
 // session reconstructs the SessionParams + leader identifier a rekey command

@@ -52,6 +52,11 @@ type Server struct {
 	// a classic coordinator session, where Join is unsupported.
 	onJoin func(hostPubkey, proof []byte) (thres.Identifier, error)
 
+	// reshareReqs receives follower reshare requests (Send with To == ReshareAddr),
+	// drained by the leader's Serve loop. Kept off the ceremony inbox so a request
+	// mid-ceremony can't be mistaken for a round message.
+	reshareReqs chan Message
+
 	grpc *grpc.Server
 	lis  net.Listener
 }
@@ -92,10 +97,11 @@ var _ Transport = (*Server)(nil)
 // them on ban (removeSub).
 func newDynamicServer(lis net.Listener) *Server {
 	s := &Server{
-		inbox: make(chan Message, chanBuf),
-		subs:  make(map[string]chan Message),
-		grpc:  grpc.NewServer(),
-		lis:   lis,
+		inbox:       make(chan Message, chanBuf),
+		subs:        make(map[string]chan Message),
+		reshareReqs: make(chan Message, chanBuf),
+		grpc:        grpc.NewServer(),
+		lis:         lis,
 	}
 	relaypb.RegisterRelayServer(s.grpc, s)
 	return s
@@ -131,6 +137,14 @@ func (s *Server) Send(ctx context.Context, env *relaypb.Envelope) (*relaypb.Ack,
 	if env.To == CoordinatorAddr {
 		select {
 		case s.inbox <- msg:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return &relaypb.Ack{}, nil
+	}
+	if env.To == ReshareAddr {
+		select {
+		case s.reshareReqs <- msg:
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -185,6 +199,9 @@ func (s *Server) Join(ctx context.Context, req *relaypb.JoinRequest) (*relaypb.J
 
 // Inbox returns the channel of messages addressed to the coordinator.
 func (s *Server) Inbox() <-chan Message { return s.inbox }
+
+// ReshareReqs returns the channel of follower reshare requests (To == ReshareAddr).
+func (s *Server) ReshareReqs() <-chan Message { return s.reshareReqs }
 
 // Broadcast queues msg for every participant (the coordinator is not a queue, so
 // it is naturally excluded), setting From to the coordinator.

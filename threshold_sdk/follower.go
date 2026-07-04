@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"sync"
 
 	core "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
@@ -22,6 +23,13 @@ type Follower struct {
 	coordAddr string
 	store     Store
 	keys      chan core.BIPDKGOutput // (re-)DKG outputs; consume via Keys()
+
+	// Set once Serve has joined, so RequestReshare can address the leader.
+	mu         sync.Mutex
+	client     *Client
+	self       core.Identifier
+	joined     chan struct{} // closed once joined
+	joinedOnce sync.Once
 }
 
 // NewJoiningFollower builds a follower that joins a leader's session dynamically: it
@@ -40,7 +48,26 @@ func NewJoiningFollower(hostSk *secp.PrivateKey, coordAddr string, leaderPub *se
 		coordAddr: coordAddr,
 		store:     store,
 		keys:      make(chan core.BIPDKGOutput, chanBuf),
+		joined:    make(chan struct{}),
 	}, nil
+}
+
+// RequestReshare asks the leader to (re-)run the DKG for the named secret, so this
+// follower receives its share of it (delivered on Keys() with Label == label). It
+// blocks until the follower has joined (or ctx is done).
+func (f *Follower) RequestReshare(ctx context.Context, label string) error {
+	select {
+	case <-f.joined:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	f.mu.Lock()
+	client := f.client
+	f.mu.Unlock()
+	if client == nil {
+		return errors.New("thresholdsdk: follower not joined")
+	}
+	return client.SendTo(ctx, ReshareAddr, Message{Type: msgReshareReq, Payload: []byte(label)})
 }
 
 // Keys delivers this follower's output after each (re-)DKG. Sends are best-effort:
@@ -69,6 +96,12 @@ func (f *Follower) Serve(ctx context.Context) error {
 	if err := client.Start(ctx); err != nil {
 		return err
 	}
+
+	f.mu.Lock()
+	f.client = client
+	f.self = self
+	f.mu.Unlock()
+	f.joinedOnce.Do(func() { close(f.joined) })
 
 	selfAddr := addrOf(self)
 	var (
@@ -101,6 +134,9 @@ func (f *Follower) Serve(ctx context.Context) error {
 				cmd, err := verifyCommand(m.Payload, f.leaderPub)
 				if err != nil || cmd.Kind != cmdRekey || cmd.Epoch <= curEpoch {
 					continue // bad signature, replay, or stale epoch
+				}
+				if _, ok := cmd.Members[selfAddr]; !ok {
+					continue // a reshare for a group this follower is not part of
 				}
 				curEpoch = cmd.Epoch
 				stop() // abandon any in-flight ceremony for an older epoch
@@ -150,6 +186,7 @@ func (f *Follower) startCeremony(ctx context.Context, self core.Identifier, cmd 
 		}
 		out, rec, err := dp.Run(cctx)
 		if err == nil {
+			out.Label = cmd.Label
 			_ = f.store.PutRecovery(out.ThresholdPubkey, rec)
 			select {
 			case f.keys <- out:

@@ -21,6 +21,9 @@ type Message struct {
 // CoordinatorAddr is the reserved transport address of the coordinator role.
 const CoordinatorAddr = "coordinator"
 
+// ReshareAddr is the reserved transport address a follower Sends a reshare request to.
+const ReshareAddr = "reshare"
+
 // Message type tags for the BIP ChillDKG two-round flow (byte-blob payloads).
 const (
 	msgPmsg1 = "pmsg1" // participant -> coordinator: round-1 message
@@ -36,6 +39,10 @@ const (
 	// Dynamic membership (leader/follower sessions): signed leader commands.
 	msgRekey   = "rekey"   // leader -> all: (re-)run the DKG over a committee
 	msgRemoved = "removed" // leader -> a member: you have been evicted
+
+	// Reshare request (follower -> leader, To == ReshareAddr): asks the leader to
+	// (re-)run the DKG for a named secret. Payload is the label.
+	msgReshareReq = "resharereq"
 )
 
 // Transport is the pluggable message channel the protocol is driven over.
