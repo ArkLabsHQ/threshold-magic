@@ -21,8 +21,6 @@ type Store interface {
 	GetRecovery(groupKey []byte) ([]byte, error)
 	Has(groupKey []byte) (bool, error)
 	List() ([][]byte, error) // the group keys currently stored
-	// Leader-only persistence.
-	PutLeaderSecret(label string, a0 []byte) error
 	GetLeaderSecret(label string) ([]byte, error)
 	Close() error
 }

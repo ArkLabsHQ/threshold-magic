@@ -34,7 +34,8 @@ type Leader struct {
 	lis    net.Listener
 	srv    *Server
 
-	events chan membershipEvent // join/ban/reshare events drained by Serve
+	events chan membershipEvent   // join/ban/reshare events drained by Serve
+	keys   chan core.BIPDKGOutput // the leader's own (re-)DKG outputs; consume via Keys()
 
 	// authorize, when non-nil, gates every Join: a host public key it rejects is
 	// refused admission even with a valid proof-of-possession.
@@ -45,7 +46,7 @@ type Leader struct {
 	banned    map[string]bool                     // hex(hostpub) blocklist
 	nextID    uint16                              // next identifier to assign on join
 	epoch     uint64                              // monotonic re-DKG epoch (across all labels)
-	groups    map[string]*groupState               // label -> last successful re-DKG result
+	groups    map[string]*groupState              // label -> last successful re-DKG result
 }
 
 // groupState is the last successful re-DKG result for one label.
@@ -110,6 +111,7 @@ func NewLeader(hostSk *secp.PrivateKey, listenAddr string, store Store, opts ...
 		lis:       lis,
 		srv:       srv,
 		events:    make(chan membershipEvent, 16),
+		keys:      make(chan core.BIPDKGOutput, chanBuf),
 		committee: map[core.Identifier]*secp.PublicKey{self: hostSk.PubKey()},
 		banned:    make(map[string]bool),
 		nextID:    leaderIDValue + 1,
@@ -130,8 +132,11 @@ func (l *Leader) Addr() net.Addr { return l.lis.Addr() }
 // commands. (Convenience for wiring tests/clients.)
 func (l *Leader) HostPubKey() *secp.PublicKey { return l.hostSk.PubKey() }
 
-// GroupPubKey is the stable group public key (33-byte compressed) for a label, available
-// after that label's first successful DKG.
+// Keys delivers the leader's own output after each successful (re-)DKG — the leader
+// is a full participant and holds a threshold share (out.Secshare)
+func (l *Leader) Keys() <-chan core.BIPDKGOutput { return l.keys }
+
+// GroupPubKey is the stable group public key (33-byte compressed) for a label
 func (l *Leader) GroupPubKey(label string) ([]byte, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -162,25 +167,10 @@ func (l *Leader) Threshold(label string) int {
 	return 0
 }
 
-// secretFor loads a label's persisted a0, generating and persisting a fresh one on
-// first use. a0 is membership-independent, which keeps a label's group key stable.
+// secretFor returns a label's a0 from the store. a0 is membership-independent, which
+// keeps a label's group key stable across re-DKGs; the store owns a0's lifecycle
 func (l *Leader) secretFor(label string) ([]byte, error) {
-	a0, err := l.store.GetLeaderSecret(label)
-	if err == nil {
-		return a0, nil
-	}
-	if !errors.Is(err, ErrNotFound) {
-		return nil, err
-	}
-	k, gerr := secp.GeneratePrivateKey()
-	if gerr != nil {
-		return nil, gerr
-	}
-	a0 = k.Serialize()
-	if perr := l.store.PutLeaderSecret(label, a0); perr != nil {
-		return nil, perr
-	}
-	return a0, nil
+	return l.store.GetLeaderSecret(label)
 }
 
 // Close stops the relay and closes the store.
@@ -344,6 +334,11 @@ func (l *Leader) rekey(ctx context.Context, label string) error {
 			l.mu.Lock()
 			l.groups[label] = &groupState{key: out.ThresholdPubkey, size: len(committee), t: int(MajorityPolicy(len(committee)))}
 			l.mu.Unlock()
+			out.Label = label
+			select {
+			case l.keys <- out:
+			default: // observer not draining: drop (best-effort, never stall the protocol)
+			}
 			return nil
 		}
 		// Evict non-responders, then retry over the remainder.

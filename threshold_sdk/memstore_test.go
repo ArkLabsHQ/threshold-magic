@@ -1,6 +1,10 @@
 package thresholdsdk
 
-import "sync"
+import (
+	"sync"
+
+	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
+)
 
 // memStore is an in-memory Store for tests. It avoids depending on the
 // badgerstore subpackage (which would form an import cycle, since badgerstore
@@ -51,22 +55,20 @@ func (s *memStore) List() ([][]byte, error) {
 	return keys, nil
 }
 
-func (s *memStore) PutLeaderSecret(label string, a0 []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cp := make([]byte, len(a0))
-	copy(cp, a0)
-	s.leader[label] = cp
-	return nil
-}
-
+// GetLeaderSecret returns the label's a0, generating and caching one on first use so
+// the group key stays stable across re-DKGs (the store now owns a0's lifecycle).
 func (s *memStore) GetLeaderSecret(label string) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	a0, ok := s.leader[label]
-	if !ok {
-		return nil, ErrNotFound
+	if a0, ok := s.leader[label]; ok {
+		return a0, nil
 	}
+	k, err := secp.GeneratePrivateKey()
+	if err != nil {
+		return nil, err
+	}
+	a0 := k.Serialize()
+	s.leader[label] = a0
 	return a0, nil
 }
 

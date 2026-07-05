@@ -7,6 +7,7 @@ package badgerstore
 import (
 	"errors"
 
+	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	badger "github.com/dgraph-io/badger/v4"
 
 	sdk "thresholdsdk"
@@ -68,11 +69,25 @@ func (s *badgerStore) GetRecovery(groupKey []byte) ([]byte, error) {
 	return s.get(recoveryKey(groupKey))
 }
 
-func (s *badgerStore) PutLeaderSecret(label string, a0 []byte) error {
-	return s.put([]byte(leaderSecretKey+"/"+label), a0)
-}
+// GetLeaderSecret returns the label's a0, generating and persisting one on first use.
 func (s *badgerStore) GetLeaderSecret(label string) ([]byte, error) {
-	return s.get([]byte(leaderSecretKey + "/" + label))
+	key := []byte(leaderSecretKey + "/" + label)
+	a0, err := s.get(key)
+	if err == nil {
+		return a0, nil
+	}
+	if !errors.Is(err, sdk.ErrNotFound) {
+		return nil, err
+	}
+	k, gerr := secp.GeneratePrivateKey()
+	if gerr != nil {
+		return nil, gerr
+	}
+	a0 = k.Serialize()
+	if perr := s.put(key, a0); perr != nil {
+		return nil, perr
+	}
+	return a0, nil
 }
 
 func (s *badgerStore) Has(groupKey []byte) (bool, error) {

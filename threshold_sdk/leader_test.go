@@ -60,6 +60,34 @@ func startFollower(ctx context.Context, t *testing.T, hostSk *secp.PrivateKey, a
 	return s
 }
 
+// TestLeaderReceivesOwnShare: the leader is a full participant, so after a reshare it
+// delivers its own threshold share on Keys()
+func TestLeaderReceivesOwnShare(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	leader, err := NewLeader(mustKey(t), "127.0.0.1:0", newMemStore())
+	require.NoError(t, err)
+	defer leader.Close()
+	go func() { _ = leader.Serve(ctx) }()
+	addr := leader.Addr().String()
+
+	// One follower joins and drives a reshare → group of 2 (leader + follower).
+	driver := startFollower(ctx, t, mustKey(t), addr, leader.HostPubKey())
+	reshareUntil(ctx, t, leader, driver, testLabel, 2)
+
+	select {
+	case out := <-leader.Keys():
+		require.Equal(t, testLabel, out.Label)
+		require.Len(t, out.Secshare, 32, "leader must hold a 32-byte share")
+		gpk, err := leader.GroupPubKey(testLabel)
+		require.NoError(t, err)
+		require.Equal(t, gpk, out.ThresholdPubkey, "share must belong to the group key")
+	case <-time.After(30 * time.Second):
+		t.Fatal("leader never delivered its own share on Keys()")
+	}
+}
+
 // TestLeaderDynamicJoinBan: a label's public key is stable as members join and are
 // banned — the headline property of the custodial leader/follower construction.
 func TestLeaderDynamicJoinBan(t *testing.T) {
