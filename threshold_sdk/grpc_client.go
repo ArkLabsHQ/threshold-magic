@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 
-	thres "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
+	thres "github.com/ArkLabsHQ/threshold-magic/threshold_core"
+	"github.com/ArkLabsHQ/threshold-magic/threshold_sdk/relaypb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"thresholdsdk/relaypb"
 )
 
 // Client is the participant-side transport: it Sends to the coordinator and

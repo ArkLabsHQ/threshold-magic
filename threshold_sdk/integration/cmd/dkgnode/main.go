@@ -17,8 +17,8 @@ import (
 	"net/http"
 	"os"
 
-	sdk "thresholdsdk"
-	"thresholdsdk/badgerstore"
+	sdk "github.com/ArkLabsHQ/threshold-magic/threshold_sdk"
+	"github.com/ArkLabsHQ/threshold-magic/threshold_sdk/badgerstore"
 
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 )

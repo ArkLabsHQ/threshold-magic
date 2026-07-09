@@ -10,7 +10,7 @@ import (
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	badger "github.com/dgraph-io/badger/v4"
 
-	sdk "thresholdsdk"
+	sdk "github.com/ArkLabsHQ/threshold-magic/threshold_sdk"
 )
 
 const (

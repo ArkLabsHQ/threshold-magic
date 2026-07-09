@@ -3,7 +3,7 @@ package threshold_signing
 import (
 	"sort"
 
-	thres "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
+	thres "github.com/ArkLabsHQ/threshold-magic/threshold_core"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 

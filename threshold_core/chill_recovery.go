@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 
-	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
 // Share recovery from a RecoveryData blob, plus its canonical serialization.

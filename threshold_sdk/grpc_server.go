@@ -10,11 +10,11 @@ import (
 	"sync"
 	"time"
 
-	thres "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
+	thres "github.com/ArkLabsHQ/threshold-magic/threshold_core"
+	"github.com/ArkLabsHQ/threshold-magic/threshold_sdk/relaypb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"thresholdsdk/relaypb"
 )
 
 //go:generate protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative relaypb/relay.proto

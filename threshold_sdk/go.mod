@@ -1,11 +1,9 @@
-module thresholdsdk
+module github.com/ArkLabsHQ/threshold-magic/threshold_sdk
 
 go 1.25.0
 
-replace github.com/ArkLabsHQ/thresholdmagic/thresholdcore => ../threshold_core
-
 require (
-	github.com/ArkLabsHQ/thresholdmagic/thresholdcore v0.0.0-00010101000000-000000000000
+	github.com/ArkLabsHQ/threshold-magic/threshold_core v0.1.0
 	github.com/btcsuite/btcd/btcec/v2 v2.3.4
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0

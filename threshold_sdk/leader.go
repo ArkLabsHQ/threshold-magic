@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	core "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
+	core "github.com/ArkLabsHQ/threshold-magic/threshold_core"
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 

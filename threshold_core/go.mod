@@ -1,4 +1,4 @@
-module github.com/ArkLabsHQ/thresholdmagic/thresholdcore
+module github.com/ArkLabsHQ/threshold-magic/threshold_core
 
 go 1.24.6
 

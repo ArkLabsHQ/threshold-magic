@@ -3,7 +3,7 @@ package thresholdsdk
 import (
 	"context"
 
-	thres "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
+	thres "github.com/ArkLabsHQ/threshold-magic/threshold_core"
 )
 
 // loopbackTransport is the leader's participant-side Transport. A leader runs the

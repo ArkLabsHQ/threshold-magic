@@ -3,8 +3,8 @@ package thresholdcore
 import (
 	"errors"
 
-	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
 // CertEq is the certifying equality check from ChillDKG: each participant

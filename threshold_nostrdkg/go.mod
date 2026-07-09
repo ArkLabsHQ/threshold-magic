@@ -2,7 +2,7 @@ module thresholdnostrdkg
 
 go 1.24.6
 
-replace github.com/ArkLabsHQ/thresholdmagic/thresholdcore => ../threshold_core
+replace github.com/ArkLabsHQ/threshold-magic/threshold_core => ../threshold_core
 
 require github.com/nbd-wtf/go-nostr v0.52.0
 
@@ -65,7 +65,7 @@ require (
 )
 
 require (
-	github.com/ArkLabsHQ/thresholdmagic/thresholdcore v0.0.0-00010101000000-000000000000
+	github.com/ArkLabsHQ/threshold-magic/threshold_core v0.0.0-00010101000000-000000000000
 	github.com/ImVexed/fasturl v0.0.0-20230304231329-4e41488060f3 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.3.4 // indirect
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0 // indirect

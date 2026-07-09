@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 
-	core "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
+	core "github.com/ArkLabsHQ/threshold-magic/threshold_core"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"

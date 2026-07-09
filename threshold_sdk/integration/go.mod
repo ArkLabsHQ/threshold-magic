@@ -2,16 +2,16 @@ module thresholdsdkintegration
 
 go 1.25.0
 
-replace thresholdsdk => ../
+replace github.com/ArkLabsHQ/threshold-magic/threshold_sdk => ../
 
-replace github.com/ArkLabsHQ/thresholdmagic/thresholdcore => ../../threshold_core
+replace github.com/ArkLabsHQ/threshold-magic/threshold_core => ../../threshold_core
 
 require (
-	github.com/ArkLabsHQ/thresholdmagic/thresholdcore v0.0.0-00010101000000-000000000000
+	github.com/ArkLabsHQ/threshold-magic/threshold_core v0.0.0-00010101000000-000000000000
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.38.0
-	thresholdsdk v0.0.0-00010101000000-000000000000
+	github.com/ArkLabsHQ/threshold-magic/threshold_sdk v0.0.0-00010101000000-000000000000
 )
 
 require (

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/btcsuite/btcd/btcec/v2/schnorr"
+	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

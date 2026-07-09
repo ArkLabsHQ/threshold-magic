@@ -4,7 +4,7 @@ import (
 	"encoding/hex"
 	"errors"
 
-	thres "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
+	thres "github.com/ArkLabsHQ/threshold-magic/threshold_core"
 	secp "github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
