@@ -1,0 +1,107 @@
+package thresholdsdk
+
+import (
+	"context"
+	"errors"
+
+	thres "github.com/ArkLabsHQ/threshold-magic/threshold_core"
+	"github.com/ArkLabsHQ/threshold-magic/threshold_sdk/relaypb"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+)
+
+// Client is the participant-side transport: it Sends to the coordinator and
+// receives its messages over a Subscribe server stream. It satisfies Transport.
+type Client struct {
+	self   string
+	conn   *grpc.ClientConn
+	client relaypb.RelayClient
+	inbox  chan Message
+	cancel context.CancelFunc
+}
+
+var _ Transport = (*Client)(nil)
+
+// NewClient dials the coordinator at target over an insecure connection. self is
+// this participant's identifier (its address is hex(self.Serialize())).
+func NewClient(target string, self thres.Identifier) (*Client, error) {
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, err
+	}
+	return &Client{
+		self:   addr(self),
+		conn:   conn,
+		client: relaypb.NewRelayClient(conn),
+		inbox:  make(chan Message, chanBuf),
+	}, nil
+}
+
+// Start opens the Subscribe stream and feeds the inbox in the background. It must
+// be called before the participant driver runs, so the participant is subscribed
+// before it sends round 1. The stream lives until Close or ctx cancellation; on
+// any stream error the inbox is closed (the driver then sees ErrProtocol).
+func (c *Client) Start(ctx context.Context) error {
+	sctx, cancel := context.WithCancel(ctx)
+	c.cancel = cancel
+	stream, err := c.client.Subscribe(sctx, &relaypb.SubscribeRequest{Addr: c.self})
+	if err != nil {
+		cancel()
+		return err
+	}
+	go func() {
+		defer close(c.inbox)
+		for {
+			env, err := stream.Recv()
+			if err != nil {
+				return
+			}
+			select {
+			case c.inbox <- fromEnvelope(env):
+			case <-sctx.Done():
+				return
+			}
+		}
+	}()
+	return nil
+}
+
+// Join registers with the leader (leader/follower sessions) and adopts the assigned
+// identifier as this client's address. Call it before Start: the client has no usable
+// address until the leader admits it.
+func (c *Client) Join(ctx context.Context, hostPubkey, proof []byte) (thres.Identifier, error) {
+	resp, err := c.client.Join(ctx, &relaypb.JoinRequest{HostPubkey: hostPubkey, Proof: proof})
+	if err != nil {
+		return thres.Identifier{}, err
+	}
+	id, err := thres.DeserializeIdentifier(resp.Identifier)
+	if err != nil {
+		return thres.Identifier{}, err
+	}
+	c.self = addr(id)
+	return id, nil
+}
+
+// Inbox returns the channel of messages addressed to this participant.
+func (c *Client) Inbox() <-chan Message { return c.inbox }
+
+// SendTo delivers msg to the coordinator (the only address a participant uses).
+func (c *Client) SendTo(ctx context.Context, to string, msg Message) error {
+	msg.From = c.self
+	msg.To = to
+	_, err := c.client.Send(ctx, toEnvelope(msg))
+	return err
+}
+
+// Broadcast is never used by a participant (only the coordinator broadcasts).
+func (c *Client) Broadcast(ctx context.Context, msg Message) error {
+	return errors.New("thresholdsdk: participant transport does not broadcast")
+}
+
+// Close stops the subscribe stream and closes the connection.
+func (c *Client) Close() error {
+	if c.cancel != nil {
+		c.cancel()
+	}
+	return c.conn.Close()
+}

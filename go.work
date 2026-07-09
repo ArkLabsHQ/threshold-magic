@@ -1,7 +1,9 @@
-go 1.24.6
+go 1.25.0
 
 use (
 	./threshold_core
-	./threshold_nostrdkg
 	./threshold_frost
+	./threshold_nostrdkg
+	./threshold_sdk
+	./threshold_sdk/integration
 )

@@ -1,0 +1,4 @@
+# Stray binary from `go build ./threshold_sdk/integration/cmd/dkgnode` run at the repo
+# root (the integration test builds its own copy into a temp dir). Anchored with a
+# leading slash so the cmd/dkgnode/ package directory is unaffected.
+/dkgnode

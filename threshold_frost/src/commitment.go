@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"io"
 
-	thres "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
+	thres "github.com/ArkLabsHQ/threshold-magic/threshold_core"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
@@ -112,7 +112,6 @@ func ComputeGroupCommitment(
 		temp := secp256k1.JacobianPoint{}
 		secp256k1.AddNonConst(&groupCommitment, &hide, &temp)
 		groupCommitment = temp
-		//
 	}
 
 	// accumulated binding commitment via MSM

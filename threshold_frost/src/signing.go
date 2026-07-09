@@ -1,7 +1,7 @@
 package threshold_signing
 
 import (
-	thres "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
+	thres "github.com/ArkLabsHQ/threshold-magic/threshold_core"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
@@ -16,10 +16,10 @@ func (s *SigningPackage) SigningCommitment(id thres.Identifier) (SigningCommitme
 }
 
 func (s *SigningPackage) encodeGroupCommitmentList() []byte {
-	groupCommitmentList := s.Commitments
-
 	var buf []byte
-	for id, comm := range groupCommitmentList {
+
+	for _, id := range sortedCommitmentIDs(s.Commitments) {
+		comm := s.Commitments[id]
 		idSerialised := id.Serialize()
 
 		buf = append(buf, idSerialised...)
@@ -56,9 +56,10 @@ func (s *SigningPackage) bindingFactorPreimages(
 	prefix = append(prefix, h5...)
 
 	// build per-identifier preimages
-	out := make([]BindingFactorPreimage, 0, len(s.Commitments))
+	ids := sortedCommitmentIDs(s.Commitments)
+	out := make([]BindingFactorPreimage, 0, len(ids))
 
-	for id := range s.Commitments {
+	for _, id := range ids {
 		buf := make([]byte, 0, len(prefix)+len(id.Serialize()))
 		buf = append(buf, prefix...)
 		buf = append(buf, id.Serialize()...)
@@ -70,30 +71,20 @@ func (s *SigningPackage) bindingFactorPreimages(
 	return out, nil
 }
 
-// / Performed once by each participant selected for the signing operation.
-// /
-// / Implements [`sign`] from the spec.
-// /
-// / Receives the message to be signed and a set of signing commitments and a set
-// / of randomizing commitments to be used in that signing operation, including
-// / that for this participant.
-// /
-// / Assumes the participant has already determined which nonce corresponds with
-// / the commitment that was assigned by the coordinator in the SigningPackage.
-// /
-// / [`sign`]: https://datatracker.ietf.org/doc/html/rfc9591#name-round-two-signature-share-g
+// Sign produces this participant's signature share (RFC 9591 round two). It assumes
+// the caller has matched its nonce to the commitment the coordinator assigned in the
+// SigningPackage.
+// https://datatracker.ietf.org/doc/html/rfc9591#name-round-two-signature-share-g
 func Sign(
 	signingPackage SigningPackage, signingNonce SigningNonce, keyPackage thres.KeyPackage) (*SignatureShare, error) {
 
 	if len(signingPackage.Commitments) < int(keyPackage.MinSigners) {
-		// Not enough participants to sign
 		return nil, thres.ErrIncorrectNumberOfCommitments
 	}
 
 	commitment := signingPackage.Commitments[keyPackage.Identifier]
 
 	if signingNonce.commitments != commitment {
-		// Nonce does not match commitment
 		return nil, ErrInvalidCommitment
 	}
 
@@ -103,6 +94,9 @@ func Sign(
 	}
 
 	groupCommitment, err := ComputeGroupCommitment(&signingPackage, bindingFactorList)
+	if err != nil {
+		return nil, err
+	}
 
 	lambda_i := DeriveInterpolatingValue(keyPackage.Identifier, &signingPackage)
 
@@ -140,14 +134,14 @@ func ComputeChallenge(R *secp256k1.JacobianPoint, vk thres.VerifyingKey, message
 // verifying each share if the final signature verification fails.
 func Aggregate(
 	signingPackage *SigningPackage,
-	signatureShares map[thres.Identifier]SignatureShare, // key = string(id.Serialize())
+	signatureShares map[thres.Identifier]SignatureShare,
 	pubkeys thres.PublicKeyPackage,
 ) (*thres.Signature, error) {
 	// 1) identifier set must match
 	if len(signingPackage.Commitments) != len(signatureShares) {
 		return nil, ErrUnknownIdentifier
 	}
-	for id, _ := range signingPackage.Commitments {
+	for id := range signingPackage.Commitments {
 		if _, ok := signatureShares[id]; !ok {
 			return nil, ErrUnknownIdentifier
 		}
@@ -166,10 +160,9 @@ func Aggregate(
 		return nil, err
 	}
 
-	// aggregate z = sum(z_i)
-	var z secp256k1.ModNScalar // zero by default
+	// aggregate z = Σ z_i (mod n)
+	var z secp256k1.ModNScalar
 	for _, sh := range signatureShares {
-		// z = z + z_i (mod n); ModNScalar.Add mutates receiver and returns it
 		z.Add(&sh.s)
 	}
 
@@ -178,15 +171,28 @@ func Aggregate(
 		Z: z,
 	}
 
-	//verify final signature with the group verifying key
-	if pubkeys.VerifyingKey.Verify(signingPackage.Message, *sig) {
-
-		if err2 := DetectCheater(&groupCommitment, &pubkeys, signingPackage, signatureShares, bfl); err2 != nil {
-			return nil, err2
-		}
-		return sig, err
+	// verify final signature with the per-message challenge
+	challenge, err := ComputeChallenge(&groupCommitment.elem, pubkeys.VerifyingKey, signingPackage.Message)
+	if err != nil {
+		return nil, err
 	}
 
+	left := secp256k1.JacobianPoint{}
+	secp256k1.ScalarBaseMultNonConst(&sig.Z, &left)
+
+	eY := secp256k1.JacobianPoint{}
+	secp256k1.ScalarMultNonConst(challenge, &pubkeys.VerifyingKey.E, &eY)
+
+	right := secp256k1.JacobianPoint{}
+	secp256k1.AddNonConst(&groupCommitment.elem, &eY, &right)
+
+	if left.EquivalentNonConst(&right) {
+		return sig, nil
+	}
+
+	if err2 := DetectCheater(&groupCommitment, &pubkeys, signingPackage, signatureShares, bfl); err2 != nil {
+		return nil, err2
+	}
 	return sig, ErrorWrongSignature
 }
 
@@ -223,7 +229,7 @@ func DetectCheater(
 		}
 	}
 
-	// If all passed, fall back to a generic error to mirror Rust's "should not reach"
+	// all shares verified individually: no single cheater identified
 	return ErrorInvalidSignature
 }
 

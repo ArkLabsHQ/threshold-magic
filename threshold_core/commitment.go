@@ -14,17 +14,28 @@ type VerifiableSecretSharingCommitment struct {
 
 func (vss VerifiableSecretSharingCommitment) MarshalJSON() ([]byte, error) {
 	out := make([]string, len(vss.Coeffs))
-
 	for i, c := range vss.Coeffs {
-		var affinePoint secp.JacobianPoint
-		affinePoint.Set(&c)
-		affinePoint.ToAffine()
-
-		pubkey := secp.NewPublicKey(&affinePoint.X, &affinePoint.Y).SerializeCompressed()
-
-		out[i] = hex.EncodeToString(pubkey)
+		b, err := encodePointWithInfinity(c)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = hex.EncodeToString(b)
 	}
 	return json.Marshal(out)
+}
+
+// SerializeCompressed returns the BIP VSSCommitment wire form (com.to_bytes()):
+// the concatenation of every coefficient commitment in 33-byte compressed form.
+func (vss VerifiableSecretSharingCommitment) SerializeCompressed() ([]byte, error) {
+	out := make([]byte, 0, compressedPointLen*len(vss.Coeffs))
+	for _, c := range vss.Coeffs {
+		b, err := encodePointWithInfinity(c)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b...)
+	}
+	return out, nil
 }
 
 func (vss *VerifiableSecretSharingCommitment) UnmarshalJSON(data []byte) error {

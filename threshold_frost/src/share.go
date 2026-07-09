@@ -1,7 +1,7 @@
 package threshold_signing
 
 import (
-	thres "github.com/ArkLabsHQ/thresholdmagic/thresholdcore"
+	thres "github.com/ArkLabsHQ/threshold-magic/threshold_core"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 )
 
@@ -15,7 +15,6 @@ func (s *SignatureShare) verify(id thres.Identifier, verifyingShare thres.Verify
 	secp256k1.ScalarBaseMultNonConst(&s.s, &left)
 
 	// right = R_i + (λ_i * e) * Y_i
-	//verifyiongShareD := (*secp256k1.ModNScalar)(&verifyingShare)
 
 	lambdaE := lambda_i.Mul(&challenge)
 	temp := secp256k1.JacobianPoint{}
